@@ -1,8 +1,8 @@
 using System;
 using System.Linq;
 using System.Threading;
-
 using Orleans.Runtime.Configuration;
+using Orleans.Serialization;
 
 namespace Orleans.Runtime.Messaging
 {
@@ -13,7 +13,7 @@ namespace Orleans.Runtime.Messaging
         private readonly SiloMessageSender pingSender;
         private readonly SiloMessageSender systemSender;
         private readonly MessageCenter messageCenter;
-        private readonly TraceLogger logger;
+        private readonly Logger logger;
         private bool stopped;
 
         public int Count
@@ -28,11 +28,11 @@ namespace Orleans.Runtime.Messaging
 
         internal const string QUEUED_TIME_METADATA = "QueuedTime";
 
-        internal OutboundMessageQueue(MessageCenter mc, IMessagingConfiguration config)
+        internal OutboundMessageQueue(MessageCenter mc, IMessagingConfiguration config, SerializationManager serializationManager)
         {
             messageCenter = mc;
-            pingSender = new SiloMessageSender("PingSender", messageCenter);
-            systemSender = new SiloMessageSender("SystemSender", messageCenter);
+            pingSender = new SiloMessageSender("PingSender", messageCenter, serializationManager);
+            systemSender = new SiloMessageSender("SystemSender", messageCenter, serializationManager);
             senders = new Lazy<SiloMessageSender>[config.SiloSenderQueues];
 
             for (int i = 0; i < senders.Length; i++)
@@ -40,12 +40,12 @@ namespace Orleans.Runtime.Messaging
                 int capture = i;
                 senders[capture] = new Lazy<SiloMessageSender>(() =>
                 {
-                    var sender = new SiloMessageSender("AppMsgsSender_" + capture, messageCenter);
+                    var sender = new SiloMessageSender("AppMsgsSender_" + capture, messageCenter, serializationManager);
                     sender.Start();
                     return sender;
                 }, LazyThreadSafetyMode.ExecutionAndPublication);
             }
-            logger = TraceLogger.GetLogger("Messaging.OutboundMessageQueue");
+            logger = LogManager.GetLogger("Messaging.OutboundMessageQueue");
             stopped = false;
         }
 
@@ -66,9 +66,9 @@ namespace Orleans.Runtime.Messaging
                 return;
             }
 
-            if (!msg.ContainsMetadata(QUEUED_TIME_METADATA))
+            if (!msg.QueuedTime.HasValue)
             {
-                msg.SetMetadata(QUEUED_TIME_METADATA, DateTime.UtcNow);
+                msg.QueuedTime = DateTime.UtcNow;
             }
 
             // First check to see if it's really destined for a proxied client, instead of a local grain.
@@ -77,15 +77,12 @@ namespace Orleans.Runtime.Messaging
                 return;
             }
 
-            if (!msg.ContainsHeader(Message.Header.TARGET_SILO))
+            if (msg.TargetSilo == null)
             {
-                logger.Error(ErrorCode.Runtime_Error_100113, "Message does not have a target silo: " + msg + " -- Call stack is: " + (new System.Diagnostics.StackTrace()));
+                logger.Error(ErrorCode.Runtime_Error_100113, "Message does not have a target silo: " + msg + " -- Call stack is: " + Utils.GetStackTrace());
                 messageCenter.SendRejection(msg, Message.RejectionTypes.Unrecoverable, "Message to be sent does not have a target silo");
                 return;
             }
-
-            if (Message.WriteMessagingTraces)
-                msg.AddTimestamp(Message.LifecycleTag.EnqueueOutgoing);
 
             // Shortcut messages to this silo
             if (msg.TargetSilo.Equals(messageCenter.MyAddress))
@@ -103,10 +100,11 @@ namespace Orleans.Runtime.Messaging
                 }
 
                 // check for simulation of lost messages
-                if(Silo.CurrentSilo.TestHook.ShouldDrop(msg))
+                if(messageCenter?.ShouldDrop?.Invoke(msg) == true)
                 {
                     logger.Info(ErrorCode.Messaging_SimulatedMessageLoss, "Message blocked by test");
                     messageCenter.SendRejection(msg, Message.RejectionTypes.Unrecoverable, "Message blocked by test");
+                    return;
                 }
 
                 // Prioritize system messages

@@ -1,8 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using Orleans.Core;
 using Orleans.Streams;
 using Orleans.Timers;
 
@@ -27,6 +23,8 @@ namespace Orleans.Runtime
         /// </summary>
         string SiloIdentity { get; }
 
+        SiloAddress SiloAddress { get; }
+
         IGrainFactory GrainFactory { get; }
 
         ITimerRegistry TimerRegistry { get; }
@@ -37,7 +35,7 @@ namespace Orleans.Runtime
 
         IServiceProvider ServiceProvider { get; }
 
-        Logger GetLogger(string loggerName, TraceLogger.LoggerType logType);
+        Logger GetLogger(string loggerName);
 
         void DeactivateOnIdle(Grain grain);
 

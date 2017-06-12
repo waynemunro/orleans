@@ -4,10 +4,10 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
-
-using Orleans.Runtime;
 using Orleans.CodeGeneration;
+using Orleans.Runtime;
 
 namespace Orleans.Serialization
 {
@@ -106,7 +106,7 @@ namespace Orleans.Serialization
 
         /// <summary> Return the output stream as a set of <c>ArraySegment</c>. </summary>
         /// <returns>Data from this stream, converted to output type.</returns>
-        public IList<ArraySegment<byte>> ToBytes()
+        public List<ArraySegment<byte>> ToBytes()
         {
             return ab.ToBytes();
         }
@@ -284,7 +284,7 @@ namespace Orleans.Serialization
                 return;
             }
 
-            if (t.IsGenericType)
+            if (t.GetTypeInfo().IsGenericType)
             {
                 if (typeTokens.TryGetValue(t.GetGenericTypeDefinition().TypeHandle, out token))
                 {
@@ -310,6 +310,12 @@ namespace Orleans.Serialization
         {
             Trace("--Wrote byte array of length {0}", b.Length);
             ab.Append(b);
+        }
+
+        /// <summary> Write a list of byte array segments to the stream. </summary>
+        public void Write(List<ArraySegment<byte>> bytes)
+        {
+            ab.Append(bytes);
         }
 
         /// <summary> Write the specified number of bytes to the stream, starting at the specified offset in the input <c>byte[]</c>. </summary>

@@ -1,41 +1,44 @@
-using System;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
 using Orleans.Concurrency;
+using Orleans.MultiCluster;
 using Orleans.Runtime.Configuration;
+using Orleans.Serialization;
 
 namespace Orleans.Runtime.MembershipService
 {
     [Reentrant]
+    [OneInstancePerCluster]
     internal class GrainBasedMembershipTable : Grain, IMembershipTableGrain
     {
         private InMemoryMembershipTable table;
-        private TraceLogger logger;
+        private Logger logger;
 
         public override Task OnActivateAsync()
         {
-            logger = TraceLogger.GetLogger("GrainBasedMembershipTable", TraceLogger.LoggerType.Runtime);
+            logger = LogManager.GetLogger("GrainBasedMembershipTable", LoggerType.Runtime);
             logger.Info(ErrorCode.MembershipGrainBasedTable1, "GrainBasedMembershipTable Activated.");
-            table = new InMemoryMembershipTable();
-            return TaskDone.Done;
+            table = new InMemoryMembershipTable(this.ServiceProvider.GetRequiredService<SerializationManager>());
+            return Task.CompletedTask;
         }
 
         public override Task OnDeactivateAsync()
         {
             logger.Info("GrainBasedMembershipTable Deactivated.");
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
-        public Task InitializeMembershipTable(GlobalConfiguration config, bool tryInitTableVersion, TraceLogger traceLogger)
+        public Task InitializeMembershipTable(GlobalConfiguration config, bool tryInitTableVersion, Logger traceLogger)
         {
             logger.Info("InitializeMembershipTable {0}.", tryInitTableVersion);
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         public Task DeleteMembershipTableEntries(string deploymentId)
         {
             logger.Info("DeleteMembershipTableEntries {0}", deploymentId);
             table = null;
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         public Task<MembershipTableData> ReadRow(SiloAddress key)
@@ -77,7 +80,7 @@ namespace Orleans.Runtime.MembershipService
         {
             if (logger.IsVerbose) logger.Verbose("UpdateIAmAlive entry = {0}", entry.ToFullString());
             table.UpdateIAmAlive(entry);
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
     }
 }

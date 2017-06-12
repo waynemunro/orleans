@@ -321,7 +321,7 @@ namespace Orleans
         Runtime_Error_100312 = Runtime + 312,
         ClientInitializing   = Runtime + 313,
         ClientStarting       = Runtime + 314,
-        Runtime_Error_100315 = Runtime + 315,
+        ClientError          = Runtime + 315,
         Runtime_Error_100316 = Runtime + 316,
         Runtime_Error_100317 = Runtime + 317,
         Runtime_Error_100318 = Runtime + 318,
@@ -383,9 +383,11 @@ namespace Orleans
         SiloShutdownEventCreated        = SiloBase + 42,
         SiloShutdownEventOpened         = SiloBase + 43,
         SiloShutdownEventReceived       = SiloBase + 44,
-        SiloLoadedDI                    = SiloBase + 45,
-        SiloFailedToLoadDI              = SiloBase + 46,
-        SiloFileNotFoundLoadingDI       = SiloBase + 47,
+        SiloLoadedDI                    = SiloBase + 45, // Not used anymore
+        SiloFailedToLoadDI              = SiloBase + 46, // Not used anymore
+        SiloFileNotFoundLoadingDI       = SiloBase + 47, // Not used anymore
+        SiloStartupEventFailure           = SiloBase + 48,
+        SiloShutdownEventFailure        = SiloBase + 49,
 
         CatalogBase                     = Runtime + 500,
         CatalogNonExistingActivation1   = CatalogBase + 1,
@@ -495,8 +497,9 @@ namespace Orleans
         MembershipGossipSendFailure            = MembershipBase + 56,
         MembershipTimerProcessingFailure       = MembershipBase + 57,
         MembershipSendPingFailure              = MembershipBase + 58,
-        MembershipUpdateIAmAliveFailure          = MembershipBase + 59,
+        MembershipUpdateIAmAliveFailure        = MembershipBase + 59,
         MembershipStartingIAmAliveTimer        = MembershipBase + 60,
+        MembershipJoiningPreconditionFailure   = MembershipBase + 61,
 
         NSMembershipStarting                   = MembershipBase + 70,
         NSMembershipBecomeActive               = MembershipBase + 71,
@@ -686,6 +689,9 @@ namespace Orleans
         Messaging_Dispatcher_TryForwardFailed   = MessagingBase + 32,
         Messaging_Dispatcher_ForwardingRequests = MessagingBase + 33,
         Messaging_SimulatedMessageLoss          = MessagingBase + 34,
+        Messaging_Dispatcher_ReturnToOriginCluster    = MessagingBase + 35,
+        MessagingAcceptAsyncSocketException     = MessagingBase + 36,
+        Messaging_ExceptionReceiveAsync         = MessagingBase + 37,
 
         DirectoryBase                           = Runtime + 1100,
         DirectoryBothPrimaryAndBackupForGrain   = DirectoryBase + 1,
@@ -747,6 +753,7 @@ namespace Orleans
         ClientRegistrarFailedToRegister_2       = GatewayBase + 17,
         ClientRegistrarFailedToUnregister       = GatewayBase + 18,
         ClientRegistrarTimerFailed              = GatewayBase + 19,
+        GatewayAcceptor_WrongClusterId          = GatewayBase + 20,
 
         TimerBase                               = Runtime + 1400,
         TimerChangeError                        = PerfCounterTimerError, // Backward compatability
@@ -820,8 +827,9 @@ namespace Orleans
         Dispatcher_InvalidActivation            = DispatcherBase + 38,
         InvokeWorkItem_UnhandledExceptionInInvoke = DispatcherBase + 39,
         Dispatcher_ErrorCreatingActivation      = DispatcherBase + 40,
+        Dispatcher_StuckActivation = DispatcherBase + 41,
 
-        SerializationBase                       = Runtime + 1600,
+        SerializationBase = Runtime + 1600,
         Ser_IncompatibleIntermediateType        = Runtime_Error_100033, // Backward compatability
         Ser_CannotConstructBaseObj              = Runtime_Error_100034, // Backward compatability
         Ser_IncompatibleType                    = Runtime_Error_100035, // Backward compatability
@@ -883,6 +891,7 @@ namespace Orleans
         SerMgr_TypeRegistrationFailureIgnore    = SerializationManagerBase + 9,
         SerMgr_ArtifactReport                   = SerializationManagerBase + 10,
         SerMgr_UnavailableSerializer            = SerializationManagerBase + 11,
+        SerMgr_SerializationMethodsMissing      = SerializationManagerBase + 12,
 
         WatchdogBase                            = Runtime + 2600,
         Watchdog_ParticipantThrownException     = WatchdogBase + 1,
@@ -938,6 +947,8 @@ namespace Orleans
         RS_RangeChanged                         = ReminderServiceBase + 34,
         RS_LocalStop                            = ReminderServiceBase + 35,
         RS_Started                              = ReminderServiceBase + 36,
+        RS_ServiceInitialLoadFailing            = ReminderServiceBase + 37,
+        RS_ServiceInitialLoadFailed             = ReminderServiceBase + 38,
 
         
         // Codes for the Consistent Ring Provider
@@ -963,6 +974,11 @@ namespace Orleans
         Provider_NotLoaded                      = ProviderManagerBase + 11,
         Provider_Manager_Already_Loaded         = ProviderManagerBase + 12,
         Provider_CatalogNoStorageProvider_3     = ProviderManagerBase + 13,
+        Provider_ProviderLoadedOk               = ProviderManagerBase + 14,
+        Provider_ProviderNotFound               = ProviderManagerBase + 15,
+        Provider_ProviderNotControllable        = ProviderManagerBase + 16,
+        Provider_CatalogNoLogConsistencyProvider       = ProviderManagerBase + 17,
+        Provider_CatalogLogConsistencyProviderAllocated = ProviderManagerBase + 18,
 
         AzureQueueBase = Runtime + 3200,
         AzureQueue_01 = AzureQueueBase + 1,
@@ -1009,6 +1025,7 @@ namespace Orleans
         PersistentStreamPullingAgent_25 = PersistentStreamPullingAgentBase + 25,
         PersistentStreamPullingAgent_26 = PersistentStreamPullingAgentBase + 26,
         PersistentStreamPullingAgent_27 = PersistentStreamPullingAgentBase + 27,
+        PersistentStreamPullingAgent_28 = PersistentStreamPullingAgentBase + 28,
 
         StreamProviderManagerBase = Runtime +3400,
         StreamProvider_FailedToDispose              = StreamProviderManagerBase + 1,
@@ -1019,6 +1036,12 @@ namespace Orleans
         Stream_ProducerIsDead                       = StreamProviderManagerBase + 6,
         StreamProvider_NoStreamForBatch             = StreamProviderManagerBase + 7,
         StreamProvider_ConsumerFailedToUnregister   = StreamProviderManagerBase + 8,
+        Stream_ConsumerIsDead                       = StreamProviderManagerBase + 9,
+        Stream_RegisterProducerFailed               = StreamProviderManagerBase + 10,
+        Stream_UnegisterProducerFailed              = StreamProviderManagerBase + 11,
+        Stream_RegisterConsumerFailed               = StreamProviderManagerBase + 12,
+        Stream_UnregisterConsumerFailed             = StreamProviderManagerBase + 13,
+        Stream_SetSubscriptionToFaultedFailed       = StreamProviderManagerBase + 14,
 
         PersistentStreamPullingManagerBase = Runtime + 3500,
         PersistentStreamPullingManager_01 = PersistentStreamPullingManagerBase + 1,
@@ -1057,6 +1080,37 @@ namespace Orleans
         CodeGenIgnoringTypes                = CodeGenBase + 5,
         CodeGenDllMissing                   = CodeGenBase + 6,
         CodeGenSystemTypeRequiresSerializer = CodeGenBase + 7,
+
+        MultiClusterNetworkBase = Runtime + 3900,
+        MultiClusterNetwork_Starting = MultiClusterNetworkBase + 1,
+        MultiClusterNetwork_Started = MultiClusterNetworkBase + 2,
+        MultiClusterNetwork_FailedToStart = MultiClusterNetworkBase + 3,
+        MultiClusterNetwork_LocalSubscriberException = MultiClusterNetworkBase + 4,
+        MultiClusterNetwork_GossipCommunicationFailure = MultiClusterNetworkBase + 5,
+        MultiClusterNetwork_NoChannelsConfigured = MultiClusterNetworkBase + 6,
+
+        CancellationTokenManagerBase        = Runtime + 4000,
+        CancellationTokenCancelFailed       = CancellationTokenManagerBase + 1,
+        CancellationExtensionCreationFailed = CancellationTokenManagerBase + 2,
+
+        GlobalSingleInstanceBase = Runtime + 4100,
+        GlobalSingleInstance_ProtocolError = GlobalSingleInstanceBase + 1,
+        GlobalSingleInstance_WarningInvalidOrigin = GlobalSingleInstanceBase + 2,
+        GlobalSingleInstance_MaintainerException = GlobalSingleInstanceBase + 3,
+        GlobalSingleInstance_MultipleOwners = GlobalSingleInstanceBase + 4,
+
+        TypeManagerBase = Runtime + 4200,
+        TypeManager_GetSiloGrainInterfaceMapError = TypeManagerBase + 1,
+
+        LogConsistencyBase = Runtime + 4300,
+        LogConsistency_UserCodeException = LogConsistencyBase + 1,
+        LogConsistency_CaughtException = LogConsistencyBase + 2,
+        LogConsistency_ProtocolError = LogConsistencyBase + 3,
+        LogConsistency_ProtocolFatalError = LogConsistencyBase + 4,
+        
+        // Note: individual Service Fabric error codes are defined in
+        // Microsoft.Orleans.ServiceFabric.Utilities.ErrorCode.
+        ServiceFabricBase = Runtime + 4400,
     }
 }
 // ReSharper restore InconsistentNaming

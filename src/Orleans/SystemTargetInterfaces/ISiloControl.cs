@@ -2,10 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Orleans.Runtime;
+using Orleans.Runtime.Configuration;
 
 namespace Orleans
 {
-    internal interface ISiloControl : ISystemTarget
+    internal interface ISiloControl : ISystemTarget, IVersionManager
     {
         Task Ping(string message);
 
@@ -19,13 +20,17 @@ namespace Orleans
 
         Task<SiloRuntimeStatistics> GetRuntimeStatistics();
         Task<List<Tuple<GrainId, string, int>>> GetGrainStatistics();
+        Task<List<DetailedGrainStatistic>> GetDetailedGrainStatistics(string[] types = null);
         Task<SimpleGrainStatistic[]> GetSimpleGrainStatistics();
         Task<DetailedGrainReport> GetDetailedGrainReport(GrainId grainId);
 
         Task UpdateConfiguration(string configuration);
 
+        Task UpdateStreamProviders(IDictionary<string, ProviderCategoryConfiguration> streamProviderConfigurations);
+  
         Task<int> GetActivationCount();
 
         Task<object> SendControlCommandToProvider(string providerTypeFullName, string providerName, int command, object arg);
+        Task<string[]> GetGrainTypeList();
     }
 }

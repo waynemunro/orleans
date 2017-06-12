@@ -1,7 +1,7 @@
 using System;
 using System.Threading.Tasks;
-using Orleans.Streams;
 using Orleans.Runtime;
+using Orleans.Streams;
 
 namespace Orleans.Providers.Streams.AzureQueue
 {
@@ -19,8 +19,8 @@ namespace Orleans.Providers.Streams.AzureQueue
         public virtual void Init(IProviderConfiguration config, string providerName, Logger logger, IServiceProvider serviceProvider)
         {
             if (config == null) throw new ArgumentNullException("config");
-            if (!config.Properties.TryGetValue(AzureQueueAdapterFactory.DATA_CONNECTION_STRING, out dataConnectionString))
-                throw new ArgumentException(String.Format("{0} property not set", AzureQueueAdapterFactory.DATA_CONNECTION_STRING));
+            if (!config.Properties.TryGetValue(AzureQueueAdapterConstants.DataConnectionStringPropertyName, out dataConnectionString))
+                throw new ArgumentException(String.Format("{0} property not set", AzureQueueAdapterConstants.DataConnectionStringPropertyName));
             if (!config.Properties.TryGetValue(QUEUE_NAME_STRING, out queueName))
                 throw new ArgumentException(String.Format("{0} property not set", QUEUE_NAME_STRING));
 
@@ -54,7 +54,7 @@ namespace Orleans.Providers.Streams.AzureQueue
         /// <returns></returns>
         public Task<IStreamFailureHandler> GetDeliveryFailureHandler(QueueId queueId)
         {
-            return Task.FromResult<IStreamFailureHandler>(new NoOpStreamDeliveryFailureHandler(false));
+            return Task.FromResult<IStreamFailureHandler>(new NoOpStreamDeliveryFailureHandler());
         }
     }
 }

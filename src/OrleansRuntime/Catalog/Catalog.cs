@@ -2,22 +2,31 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
-
+using Orleans.CodeGeneration;
 using Orleans.Core;
+using Orleans.GrainDirectory;
+using Orleans.MultiCluster;
 using Orleans.Providers;
+using Orleans.LogConsistency;
 using Orleans.Runtime.Configuration;
 using Orleans.Runtime.GrainDirectory;
+using Orleans.Runtime.Messaging;
 using Orleans.Runtime.Placement;
 using Orleans.Runtime.Scheduler;
+using Orleans.Runtime.Versions;
+using Orleans.Serialization;
 using Orleans.Storage;
-
+using Orleans.Streams.Core;
+using Orleans.Streams;
+using Orleans.Versions.Compatibility;
 
 namespace Orleans.Runtime
 {
-    internal class Catalog : SystemTarget, ICatalog, IPlacementContext, ISiloStatusListener
+    internal class Catalog : SystemTarget, ICatalog, IPlacementRuntime, ISiloStatusListener
     {
         /// <summary>
         /// Exception to indicate that the activation would have been a duplicate so messages pending for it should be redirected.
@@ -46,6 +55,7 @@ namespace Orleans.Runtime
                 PrimaryDirectoryForGrain = primaryDirectoryForGrain;
             }
 
+#if !NETSTANDARD
             // Implementation of exception serialization with custom properties according to:
             // http://stackoverflow.com/questions/94488/what-is-the-correct-way-to-make-a-custom-net-exception-serializable
             protected DuplicateActivationException(SerializationInfo info, StreamingContext context)
@@ -68,6 +78,7 @@ namespace Orleans.Runtime
                 // MUST call through to the base class to let it save its own state
                 base.GetObjectData(info, context);
             }
+#endif
         }
 
         [Serializable]
@@ -89,6 +100,7 @@ namespace Orleans.Runtime
                 IsStatelessWorker = isStatelessWorker;
             }
 
+#if !NETSTANDARD
             protected NonExistentActivationException(SerializationInfo info, StreamingContext context)
                 : base(info, context)
             {
@@ -109,10 +121,12 @@ namespace Orleans.Runtime
                 // MUST call through to the base class to let it save its own state
                 base.GetObjectData(info, context);
             }
+#endif
         }
 
-        
+
         public GrainTypeManager GrainTypeManager { get; private set; }
+
         public SiloAddress LocalSilo { get; private set; }
         internal ISiloStatusOracle SiloStatusOracle { get; set; }
         internal readonly ActivationCollector ActivationCollector;
@@ -121,8 +135,11 @@ namespace Orleans.Runtime
         private readonly OrleansTaskScheduler scheduler;
         private readonly ActivationDirectory activations;
         private IStorageProviderManager storageProviderManager;
-        private Dispatcher dispatcher;
-        private readonly TraceLogger logger;
+        private ILogConsistencyProviderManager logConsistencyProviderManager;
+        private IStreamProviderRuntime providerRuntime;
+        private IStreamProviderManager providerManager;
+        private IServiceProvider serviceProvider;
+        private readonly Logger logger;
         private int collectionNumber;
         private int destroyActivationsNumber;
         private IDisposable gcTimer;
@@ -133,35 +150,54 @@ namespace Orleans.Runtime
         private readonly CounterStatistic activationsFailedToActivate;
         private readonly IntValueStatistic inProcessRequests;
         private readonly CounterStatistic collectionCounter;
-        private readonly IGrainRuntime grainRuntime;
+        private readonly GrainCreator grainCreator;
+        private readonly NodeConfiguration nodeConfig;
+        private readonly TimeSpan maxRequestProcessingTime;
+        private readonly TimeSpan maxWarningRequestProcessingTime;
+        private readonly SerializationManager serializationManager;
+        private readonly MultiClusterRegistrationStrategyManager multiClusterRegistrationStrategyManager;
+        private readonly CachedVersionSelectorManager versionSelectorManager;
 
-        internal Catalog(
-            GrainId grainId, 
-            SiloAddress silo, 
-            string siloName, 
-            ILocalGrainDirectory grainDirectory, 
+        public Catalog(
+            ILocalSiloDetails localSiloDetails,
+            ILocalGrainDirectory grainDirectory,
             GrainTypeManager typeManager,
-            OrleansTaskScheduler scheduler, 
-            ActivationDirectory activationDirectory, 
-            ClusterConfiguration config, 
-            IGrainRuntime grainRuntime,
-            out Action<Dispatcher> setDispatcher)
-            : base(grainId, silo)
+            OrleansTaskScheduler scheduler,
+            ActivationDirectory activationDirectory,
+            ClusterConfiguration config,
+            GrainCreator grainCreator,
+            NodeConfiguration nodeConfig,
+            ISiloMessageCenter messageCenter,
+            PlacementDirectorsManager placementDirectorsManager,
+            MessageFactory messageFactory,
+            SerializationManager serializationManager,
+            MultiClusterRegistrationStrategyManager multiClusterRegistrationStrategyManager,
+            IStreamProviderRuntime providerRuntime,
+            IStreamProviderManager providerManager,
+            IServiceProvider serviceProvider,
+            CachedVersionSelectorManager versionSelectorManager)
+            : base(Constants.CatalogId, messageCenter.MyAddress)
         {
-            LocalSilo = silo;
-            localSiloName = siloName;
+            LocalSilo = localSiloDetails.SiloAddress;
+            localSiloName = localSiloDetails.Name;
             directory = grainDirectory;
             activations = activationDirectory;
             this.scheduler = scheduler;
             GrainTypeManager = typeManager;
-            this.grainRuntime = grainRuntime;
             collectionNumber = 0;
             destroyActivationsNumber = 0;
-
-            logger = TraceLogger.GetLogger("Catalog", TraceLogger.LoggerType.Runtime);
+            this.grainCreator = grainCreator;
+            this.nodeConfig = nodeConfig;
+            this.serializationManager = serializationManager;
+            this.multiClusterRegistrationStrategyManager = multiClusterRegistrationStrategyManager;
+            this.versionSelectorManager = versionSelectorManager;
+            this.providerRuntime = providerRuntime;
+            this.serviceProvider = serviceProvider;
+            this.providerManager = providerManager;
+            logger = LogManager.GetLogger("Catalog", Runtime.LoggerType.Runtime);
             this.config = config.Globals;
-            setDispatcher = d => dispatcher = d;
             ActivationCollector = new ActivationCollector(config);
+            this.Dispatcher = new Dispatcher(scheduler, messageCenter, this, config, placementDirectorsManager, grainDirectory, messageFactory, serializationManager, versionSelectorManager.CompatibilityDirectorManager);
             GC.GetTotalMemory(true); // need to call once w/true to ensure false returns OK value
 
             config.OnConfigChange("Globals/Activation", () => scheduler.RunOrQueueAction(Start, SchedulingContext), false);
@@ -183,6 +219,32 @@ namespace Orleans.Runtime
                 }
                 return counter;
             });
+            maxWarningRequestProcessingTime = this.config.ResponseTimeout.Multiply(5);
+            maxRequestProcessingTime = this.config.MaxRequestProcessingTime;
+        }
+
+        /// <summary>
+        /// Gets the dispatcher used by this instance.
+        /// </summary>
+        public Dispatcher Dispatcher { get; }
+
+        public IList<SiloAddress> GetCompatibleSilos(PlacementTarget target)
+        {
+            // For test only: if we have silos that are not yet in the Cluster TypeMap, we assume that they are compatible
+            // with the current silo
+            if (this.config.AssumeHomogenousSilosForTesting)
+                return AllActiveSilos;
+
+            var typeCode = target.GrainIdentity.TypeCode;
+            var silos = target.InterfaceVersion > 0
+                ? versionSelectorManager.GetSuitableSilos(typeCode, target.InterfaceId, target.InterfaceVersion)
+                : GrainTypeManager.GetSupportedSilos(typeCode);
+
+            var compatibleSilos = silos.Intersect(AllActiveSilos).ToList();
+            if (compatibleSilos.Count == 0)
+                throw new OrleansException($"TypeCode ${typeCode} not supported in the cluster");
+
+            return compatibleSilos;
         }
 
         internal void SetStorageManager(IStorageProviderManager storageManager)
@@ -190,11 +252,22 @@ namespace Orleans.Runtime
             storageProviderManager = storageManager;
         }
 
+        internal void SetLogConsistencyManager(ILogConsistencyProviderManager logConsistencyManager)
+        {
+            logConsistencyProviderManager = logConsistencyManager;
+        }
+
         internal void Start()
         {
             if (gcTimer != null) gcTimer.Dispose();
 
-            var t = GrainTimer.FromTaskCallback(OnTimer, null, TimeSpan.Zero, ActivationCollector.Quantum, "Catalog.GCTimer");
+            var t = GrainTimer.FromTaskCallback(
+                this.RuntimeClient.Scheduler,
+                OnTimer,
+                null,
+                TimeSpan.Zero,
+                ActivationCollector.Quantum,
+                "Catalog.GCTimer");
             t.Start();
             gcTimer = t;
         }
@@ -262,6 +335,31 @@ namespace Orleans.Runtime
                 .ToList();
         }
 
+        public List<DetailedGrainStatistic> GetDetailedGrainStatistics(string[] types=null)
+        {
+            var stats = new List<DetailedGrainStatistic>();
+            lock (activations)
+            {
+                foreach (var activation in activations)
+                {
+                    ActivationData data = activation.Value;
+                    if (data == null || data.GrainInstance == null) continue;
+
+                    if (types==null || types.Contains(TypeUtils.GetFullName(data.GrainInstanceType)))
+                    {
+                        stats.Add(new DetailedGrainStatistic()
+                        {
+                            GrainType = TypeUtils.GetFullName(data.GrainInstanceType),
+                            GrainIdentity = data.Grain,
+                            SiloAddress = data.Silo,
+                            Category = data.Grain.Category.ToString()
+                        });
+                    }
+                }
+            }
+            return stats;
+        }
+
         public IEnumerable<KeyValuePair<string, long>> GetSimpleGrainStatistics()
         {
             return activations.GetSimpleGrainStatistics();
@@ -275,14 +373,15 @@ namespace Orleans.Runtime
                 SiloAddress = LocalSilo,
                 SiloName = localSiloName,
                 LocalCacheActivationAddresses = directory.GetLocalCacheData(grain),
-                LocalDirectoryActivationAddresses = directory.GetLocalDirectoryData(grain),
+                LocalDirectoryActivationAddresses = directory.GetLocalDirectoryData(grain).Addresses,
                 PrimaryForGrain = directory.GetPrimaryForGrain(grain)
             };
             try
             {
                 PlacementStrategy unused;
+                MultiClusterRegistrationStrategy unusedActivationStrategy;
                 string grainClassName;
-                GrainTypeManager.GetTypeInfo(grain.GetTypeCode(), out grainClassName, out unused);
+                GrainTypeManager.GetTypeInfo(grain.TypeCode, out grainClassName, out unused, out unusedActivationStrategy);
                 report.GrainClassTypeName = grainClassName;
             }
             catch (Exception exc)
@@ -297,7 +396,7 @@ namespace Orleans.Runtime
             return report;
         }
 
-        #region MessageTargets
+#region MessageTargets
 
         /// <summary>
         /// Register a new object to which messages can be delivered with the local lookup table and scheduler.
@@ -305,8 +404,7 @@ namespace Orleans.Runtime
         /// <param name="activation"></param>
         public void RegisterMessageTarget(ActivationData activation)
         {
-            var context = new SchedulingContext(activation);
-            scheduler.RegisterWorkContext(context);
+            scheduler.RegisterWorkContext(activation.SchedulingContext);
             activations.RecordNewTarget(activation);
             activationsCreated.Increment();
         }
@@ -323,7 +421,7 @@ namespace Orleans.Runtime
             ActivationCollector.TryCancelCollection(activation);
             activationsDestroyed.Increment();
 
-            scheduler.UnregisterWorkContext(new SchedulingContext(activation));
+            scheduler.UnregisterWorkContext(activation.SchedulingContext);
 
             if (activation.GrainInstance == null) return;
 
@@ -348,28 +446,28 @@ namespace Orleans.Runtime
             return numActsBefore;
         }
 
-        #endregion
+#endregion
 
-        #region Grains
+#region Grains
 
-        internal bool IsReentrantGrain(ActivationId running)
+        internal bool CanInterleave(ActivationId running, Message message)
         {
             ActivationData target;
             GrainTypeData data;
             return TryGetActivationData(running, out target) &&
                 target.GrainInstance != null &&
                 GrainTypeManager.TryGetData(TypeUtils.GetFullName(target.GrainInstanceType), out data) &&
-                data.IsReentrant;
+                (data.IsReentrant || data.MayInterleave((InvokeMethodRequest)message.GetDeserializedBody(this.serializationManager)));
         }
 
-        public void GetGrainTypeInfo(int typeCode, out string grainClass, out PlacementStrategy placement, string genericArguments = null)
+        public void GetGrainTypeInfo(int typeCode, out string grainClass, out PlacementStrategy placement, out MultiClusterRegistrationStrategy activationStrategy, string genericArguments = null)
         {
-            GrainTypeManager.GetTypeInfo(typeCode, out grainClass, out placement, genericArguments);
+            GrainTypeManager.GetTypeInfo(typeCode, out grainClass, out placement, out activationStrategy, genericArguments);
         }
 
-        #endregion
+#endregion
 
-        #region Activations
+#region Activations
 
         public int ActivationCount { get { return activations.Count; } }
 
@@ -383,6 +481,7 @@ namespace Orleans.Runtime
         /// <param name="newPlacement">Creation of new activation was requested by the placement director.</param>
         /// <param name="grainType">The type of grain to be activated or created</param>
         /// <param name="genericArguments">Specific generic type of grain to be activated or created</param>
+        /// <param name="requestContextData">Request context data.</param>
         /// <param name="activatedPromise"></param>
         /// <returns></returns>
         public ActivationData GetOrCreateActivation(
@@ -394,40 +493,50 @@ namespace Orleans.Runtime
             out Task activatedPromise)
         {
             ActivationData result;
-            activatedPromise = TaskDone.Done;
+            activatedPromise = Task.CompletedTask;
             PlacementStrategy placement;
 
             lock (activations)
             {
                 if (TryGetActivationData(address.Activation, out result))
                 {
-                    ActivationCollector.TryRescheduleCollection(result);
                     return result;
                 }
-
-                int typeCode = address.Grain.GetTypeCode();
+                
+                int typeCode = address.Grain.TypeCode;
                 string actualGrainType = null;
+                MultiClusterRegistrationStrategy activationStrategy;
 
-                if (typeCode != 0) // special case for Membership grain.
-                    GetGrainTypeInfo(typeCode, out actualGrainType, out placement);
-                else
-                    placement = SystemPlacement.Singleton;
-
-                if (newPlacement && !SiloStatusOracle.CurrentStatus.IsTerminating())
+                if (typeCode != 0)
                 {
-                    // create a dummy activation that will queue up messages until the real data arrives
+                    GetGrainTypeInfo(typeCode, out actualGrainType, out placement, out activationStrategy, genericArguments);
                     if (string.IsNullOrEmpty(grainType))
                     {
                         grainType = actualGrainType;
                     }
+                }
+                else
+                {
+                    // special case for Membership grain.
+                    placement = SystemPlacement.Singleton;
+                    activationStrategy = ClusterLocalRegistration.Singleton;
+                }
 
+                if (newPlacement && !SiloStatusOracle.CurrentStatus.IsTerminating())
+                {
+                    // create a dummy activation that will queue up messages until the real data arrives
                     // We want to do this (RegisterMessageTarget) under the same lock that we tested TryGetActivationData. They both access ActivationDirectory.
                     result = new ActivationData(
                         address, 
                         genericArguments, 
                         placement, 
+                        activationStrategy,
                         ActivationCollector, 
-                        config.Application.GetCollectionAgeLimit(grainType));
+                        config.Application.GetCollectionAgeLimit(grainType),
+                        this.nodeConfig,
+                        this.maxWarningRequestProcessingTime,
+                        this.maxRequestProcessingTime,
+                        this.RuntimeClient);
                     RegisterMessageTarget(result);
                 }
             } // End lock
@@ -447,11 +556,8 @@ namespace Orleans.Runtime
             return result;
         }
 
-        private void SetupActivationInstance(ActivationData result, string grainType, string genericInterface)
+        private void SetupActivationInstance(ActivationData result, string grainType, string genericArguments)
         {
-            var genericArguments = String.IsNullOrEmpty(genericInterface) ? null
-                : TypeUtils.GenericTypeArgsString(genericInterface);
-
             lock (result)
             {
                 if (result.GrainInstance == null)
@@ -461,7 +567,7 @@ namespace Orleans.Runtime
             }
         }
 
-        private async Task InitActivation(ActivationData activation, string grainType, string genericInterface, Dictionary<string, object> requestContextData)
+        private async Task InitActivation(ActivationData activation, string grainType, string genericArguments, Dictionary<string, object> requestContextData)
         {
             // We've created a dummy activation, which we'll eventually return, but in the meantime we'll queue up (or perform promptly)
             // the operations required to turn the "dummy" activation into a real activation
@@ -476,7 +582,7 @@ namespace Orleans.Runtime
                 await RegisterActivationInGrainDirectoryAndValidate(activation);
 
                 initStage = 2;
-                await SetupActivationState(activation, grainType);                
+                await SetupActivationState(activation, String.IsNullOrEmpty(genericArguments) ? grainType : $"{grainType}[{genericArguments}]");
 
                 initStage = 3;
                 await InvokeActivate(activation, requestContextData);
@@ -520,22 +626,22 @@ namespace Orleans.Runtime
                                 // If this was a duplicate, it's not an error, just a race.
                                 // Forward on all of the pending messages, and then forget about this activation.
                                 string logMsg = String.Format("Tried to create a duplicate activation {0}, but we'll use {1} instead. " +
-                                                            "GrainInstanceType is {2}. " +
+                                    "GrainInstanceType is {2}. " +
                                                             "{3}" +
                                                             "Full activation address is {4}. We have {5} messages to forward.",
-                                                address,
-                                                target,
-                                                activation.GrainInstanceType,
+                                    address,
+                                    target,
+                                    activation.GrainInstanceType,
                                                 primary != null ? "Primary Directory partition for this grain is " + primary + ". " : String.Empty,
-                                                address.ToFullString(),
-                                                activation.WaitingCount);
-                                if (activation.IsStatelessWorker)
+                                    address.ToFullString(),
+                                    activation.WaitingCount);
+                                if (activation.IsUsingGrainDirectory)
                                 {
-                                    if (logger.IsVerbose) logger.Verbose(ErrorCode.Catalog_DuplicateActivation, logMsg);
+                                    logger.Info(ErrorCode.Catalog_DuplicateActivation, logMsg);
                                 }
                                 else
                                 {
-                                    logger.Info(ErrorCode.Catalog_DuplicateActivation, logMsg);
+                                    if (logger.IsVerbose) logger.Verbose(ErrorCode.Catalog_DuplicateActivation, logMsg);
                                 }
                                 RerouteAllQueuedMessages(activation, target, "Duplicate activation", ex);
                             }
@@ -545,9 +651,9 @@ namespace Orleans.Runtime
                                     String.Format("Failed to RegisterActivationInGrainDirectory for {0}.",
                                         activation), ex);
                                 // Need to undo the registration we just did earlier
-                                if (!activation.IsStatelessWorker)
+                                if (activation.IsUsingGrainDirectory)
                                 {
-                                    scheduler.RunOrQueueTask(() => directory.UnregisterAsync(address),
+                                    scheduler.RunOrQueueTask(() => directory.UnregisterAsync(address, UnregistrationCause.Force),
                                         SchedulingContext).Ignore();
                                 }
                                 RerouteAllQueuedMessages(activation, null,
@@ -560,9 +666,9 @@ namespace Orleans.Runtime
                             logger.Warn(ErrorCode.Catalog_Failed_SetupActivationState,
                                 String.Format("Failed to SetupActivationState for {0}.", activation), ex);
                             // Need to undo the registration we just did earlier
-                            if (!activation.IsStatelessWorker)
+                            if (activation.IsUsingGrainDirectory)
                             {
-                                scheduler.RunOrQueueTask(() => directory.UnregisterAsync(address),
+                                scheduler.RunOrQueueTask(() => directory.UnregisterAsync(address, UnregistrationCause.Force),
                                     SchedulingContext).Ignore();
                             }
 
@@ -574,9 +680,9 @@ namespace Orleans.Runtime
                             logger.Warn(ErrorCode.Catalog_Failed_InvokeActivate,
                                 String.Format("Failed to InvokeActivate for {0}.", activation), ex);
                             // Need to undo the registration we just did earlier
-                            if (!activation.IsStatelessWorker)
+                            if (activation.IsUsingGrainDirectory)
                             {
-                                scheduler.RunOrQueueTask(() => directory.UnregisterAsync(address),
+                                scheduler.RunOrQueueTask(() => directory.UnregisterAsync(address, UnregistrationCause.Force),
                                     SchedulingContext).Ignore();
                             }
 
@@ -599,15 +705,15 @@ namespace Orleans.Runtime
         private void CreateGrainInstance(string grainTypeName, ActivationData data, string genericArguments)
         {
             string grainClassName;
-            var interfaceToClassMap = GrainTypeManager.GetGrainInterfaceToClassMap();
-            if (!interfaceToClassMap.TryGetValue(grainTypeName, out grainClassName))
+            if (!GrainTypeManager.TryGetPrimaryImplementation(grainTypeName, out grainClassName))
             {
                 // Lookup from grain type code
-                var typeCode = data.Grain.GetTypeCode();
+                var typeCode = data.Grain.TypeCode;
                 if (typeCode != 0)
                 {
                     PlacementStrategy unused;
-                    GetGrainTypeInfo(typeCode, out grainClassName, out unused, genericArguments);
+                    MultiClusterRegistrationStrategy unusedActivationStrategy;
+                    GetGrainTypeInfo(typeCode, out grainClassName, out unused, out unusedActivationStrategy, genericArguments);
                 }
                 else
                 {
@@ -617,54 +723,94 @@ namespace Orleans.Runtime
 
             GrainTypeData grainTypeData = GrainTypeManager[grainClassName];
 
+            //Get the grain's type
             Type grainType = grainTypeData.Type;
 
-            // TODO: Change back to GetRequiredService after stable Microsoft.Framework.DependencyInjection is released and can be referenced here
-            var services = Runtime.Silo.CurrentSilo.Services;
-            var grain = services != null
-                ? (Grain) services.GetService(grainType)
-                : (Grain) Activator.CreateInstance(grainType);
-
-            // Inject runtime hooks into grain instance
-            grain.Runtime = grainRuntime;
-            grain.Data = data;
-
+            //Gets the type for the grain's state
             Type stateObjectType = grainTypeData.StateObjectType;
-            object state = null;
-            if (stateObjectType != null)
-            {
-                state = Activator.CreateInstance(stateObjectType);
-            }
             
             lock (data)
             {
-                grain.Identity = data.Identity;
-                data.SetGrainInstance(grain);
-                var statefulGrain = grain as IStatefulGrain;
-                if (statefulGrain != null)
+                data.SetupContext(grainTypeData, this.serviceProvider);
+
+                Grain grain;
+
+                if (typeof(IStatefulGrain).IsAssignableFrom(grainType))
                 {
-                    if (state != null)
+                    //for stateful grains, install storage bridge
+                    SetupStorageProvider(grainType, data);
+
+                    var storage = new GrainStateStorageBridge(grainType.FullName, data.StorageProvider);
+
+                    grain = grainCreator.CreateGrainInstance(data, stateObjectType, storage);
+
+                    storage.SetGrain(grain);
+                }
+                else
+                {
+                    // Create a new instance of the given grain type
+                    grain = grainCreator.CreateGrainInstance(data);
+
+                    // for log-view grains, install log-view adaptor
+                    if (grain is ILogConsistentGrain)
                     {
-                        SetupStorageProvider(data);
-                        statefulGrain.GrainState.State = state;
-                        statefulGrain.SetStorage(new GrainStateStorageBridge(data.GrainTypeName, statefulGrain,
-                            data.StorageProvider));
+                        var consistencyProvider = SetupLogConsistencyProvider(grain, grainType, data);
+                        grainCreator.InstallLogViewAdaptor(grain, grainType,
+                            grainTypeData.StateObjectType, grainTypeData.MultiClusterRegistrationStrategy ?? this.multiClusterRegistrationStrategyManager.DefaultStrategy,
+                            consistencyProvider, data.StorageProvider);
                     }
                 }
+                
+                Dictionary<Type, IStreamSubscriptionObserverProxy> observerProxyMap;
+                //if grain implements IStreamSubscriptionObserver<T>, then can get a set of subscriptionObserver from it
+                if(TryGetStreamSubscriptionObservers(grainType, grain, out observerProxyMap))
+                    InstallStreamConsumerExtension(data, observerProxyMap);
+
+                grain.Data = data;
+                data.SetGrainInstance(grain);
             }
+
 
             activations.IncrementGrainCounter(grainClassName);
 
             if (logger.IsVerbose) logger.Verbose("CreateGrainInstance {0}{1}", data.Grain, data.ActivationId);
         }
 
-        private void SetupStorageProvider(ActivationData data)
+        private void InstallStreamConsumerExtension(ActivationData result, Dictionary<Type, IStreamSubscriptionObserverProxy> observerProxyMap)
         {
-            var grainTypeName = data.GrainInstanceType.FullName;
+            var invoker = InsideRuntimeClient.TryGetExtensionInvoker(this.GrainTypeManager, typeof(IStreamConsumerExtension));
+            if (invoker == null)
+                throw new InvalidOperationException("Extension method invoker was not generated for an extension interface");
+            var subscriptionChangeHandler = new StreamSubscriptionChangeHandler(this.providerManager, observerProxyMap);
+            var handler = new StreamConsumerExtension(this.providerRuntime, subscriptionChangeHandler);
+            result.TryAddExtension(invoker, handler);
+        }
+
+        private bool TryGetStreamSubscriptionObservers(Type grainType, IAddressable grain, out Dictionary<Type, IStreamSubscriptionObserverProxy> observerProxyMap)
+        {
+            var interfaces = grainType.GetInterfaces();
+            var subObserverProxyMap = new Dictionary<Type, IStreamSubscriptionObserverProxy>();
+            foreach (var interf in interfaces)
+            {
+                //use GetTypeInfo for netstandard compatible
+                if (interf.GetTypeInfo().IsGenericType && (interf.GetGenericTypeDefinition().GetTypeInfo().IsEquivalentTo(typeof(IStreamSubscriptionObserver<>))))
+                {
+                    var typeParam = interf.GetGenericArguments()[0];
+                    var observerProxy = (IStreamSubscriptionObserverProxy)this.serviceProvider.GetService(interf);
+                    observerProxy.SubscriptionObserver = grain;
+                    subObserverProxyMap.Add(typeParam, observerProxy);
+                }
+            }
+            observerProxyMap = subObserverProxyMap;
+            return subObserverProxyMap.Count > 0;
+        }
+
+        private void SetupStorageProvider(Type grainType, ActivationData data)
+        {
+            var grainTypeName = grainType.FullName;
 
             // Get the storage provider name, using the default if not specified.
-            var attrs = data.GrainInstanceType.GetCustomAttributes(typeof(StorageProviderAttribute), true);
-            var attr = attrs.FirstOrDefault() as StorageProviderAttribute;
+            var attr = grainType.GetTypeInfo().GetCustomAttributes<StorageProviderAttribute>(true).FirstOrDefault();
             var storageProviderName = attr != null ? attr.ProviderName : Constants.DEFAULT_STORAGE_PROVIDER_NAME;
 
             IStorageProvider provider;
@@ -703,6 +849,72 @@ namespace Orleans.Runtime
             }
         }
 
+        private ILogViewAdaptorFactory SetupLogConsistencyProvider(Grain grain, Type grainType, ActivationData data)
+        {
+            var attr = grainType.GetTypeInfo().GetCustomAttributes<LogConsistencyProviderAttribute>(true).FirstOrDefault();
+            var consistencyProviderName = attr?.ProviderName;
+
+            ILogConsistencyProvider consistencyProvider;
+
+            if (logConsistencyProviderManager == null)
+            {
+                var errMsg = string.Format("No consistency provider manager found loading grain type {0}", grainType.FullName);
+                logger.Error(ErrorCode.Provider_CatalogNoLogConsistencyProvider, errMsg);
+                throw new BadProviderConfigException(errMsg);
+            }
+
+            if (!string.IsNullOrWhiteSpace(consistencyProviderName))
+            {
+                // find the named consistency provider; throw exception if it is not in the config
+                if (!logConsistencyProviderManager.TryGetProvider(consistencyProviderName, out consistencyProvider, false))
+                {
+                    var errMsg = string.Format(
+                        "Cannot find consistency provider with Name={0} for grain type {1}", attr.ProviderName,
+                        grainType.FullName);
+                    logger.Error(ErrorCode.Provider_CatalogNoLogConsistencyProvider, errMsg);
+                    throw new BadProviderConfigException(errMsg);
+                }
+            }
+            else
+            {
+                // See if the config specifies a "Default" consistency provider; if so use that
+                logConsistencyProviderManager.TryGetProvider(Constants.DEFAULT_LOG_CONSISTENCY_PROVIDER_NAME, out consistencyProvider, true);
+            }
+
+            if (consistencyProvider != null)
+            {
+                // we found a log consistency provider in the configuration file
+
+                // if it depends on a storage provider, find that one too
+                if (consistencyProvider.UsesStorageProvider)
+                    SetupStorageProvider(grainType, data);
+
+                string msg = string.Format("Assigned log consistency provider with Name={0} to grain type {1}",
+                    attr.ProviderName, grainType.FullName);
+                logger.Verbose2(ErrorCode.Provider_CatalogLogConsistencyProviderAllocated, msg);
+
+                return consistencyProvider;
+            }
+
+            // Case 2 : no log consistency provider was specified in the configuration file. 
+            // now we check if the grain type specifies a default adaptor factory
+
+            var defaultFactory = ((ILogConsistentGrain)grain).DefaultAdaptorFactory;
+
+            if (defaultFactory == null)
+            {
+                var errMsg = string.Format("No log consistency provider found loading grain type {0}", grainType.FullName);
+                logger.Error(ErrorCode.Provider_CatalogNoLogConsistencyProvider, errMsg);
+                throw new BadProviderConfigException(errMsg);
+            };
+
+            // if it depends on a storage provider, find that one too
+            if (defaultFactory.UsesStorageProvider)
+                SetupStorageProvider(grainType, data);
+
+            return defaultFactory;
+        }
+
         private async Task SetupActivationState(ActivationData result, string grainType)
         {
             var statefulGrain = result.GrainInstance as IStatefulGrain;
@@ -725,7 +937,7 @@ namespace Orleans.Runtime
 
                     await scheduler.RunOrQueueTask(() =>
                         result.StorageProvider.ReadStateAsync(grainType, grainRef, state),
-                        new SchedulingContext(result));
+                        result.SchedulingContext);
                     
                     sw.Stop();
                     StorageStatisticsGroup.OnStorageActivate(result.StorageProvider, grainType, result.GrainReference, sw.Elapsed);
@@ -775,6 +987,24 @@ namespace Orleans.Runtime
         // Cannot be awaitable, since after DestroyActivation is done the activation is in Invalid state and cannot await any Task.
         internal void DeactivateActivationOnIdle(ActivationData data)
         {
+            DeactivateActivationImpl(data, StatisticNames.CATALOG_ACTIVATION_SHUTDOWN_VIA_DEACTIVATE_ON_IDLE);
+        }
+
+        // To be called fro within Activation context.
+        // To be used only if an activation is stuck for a long time, since it can lead to a duplicate activation
+        internal void DeactivateStuckActivation(ActivationData activationData)
+        {
+            DeactivateActivationImpl(activationData, StatisticNames.CATALOG_ACTIVATION_SHUTDOWN_VIA_DEACTIVATE_STUCK_ACTIVATION);
+            // The unregistration is normally done in the regular deactivation process, but since this activation seems
+            // stuck (it might never run the deactivation process), we remove it from the directory directly
+            scheduler.RunOrQueueTask(
+                () => directory.UnregisterAsync(activationData.Address, UnregistrationCause.Force),
+                SchedulingContext)
+                .Ignore();
+        }
+
+        private void DeactivateActivationImpl(ActivationData data, StatisticName statisticName)
+        {
             bool promptly = false;
             bool alreadBeingDestroyed = false;
             lock (data)
@@ -793,6 +1023,18 @@ namespace Orleans.Runtime
                         data.AddOnInactive(() => DestroyActivationVoid(data));
                     }
                 }
+                else if (data.State == ActivationState.Create)
+                {
+                    throw new InvalidOperationException(String.Format(
+                        "Activation {0} has called DeactivateOnIdle from within a constructor, which is not allowed.",
+                            data.ToString()));
+                }
+                else if (data.State == ActivationState.Activating)
+                {
+                    throw new InvalidOperationException(String.Format(
+                        "Activation {0} has called DeactivateOnIdle from within OnActivateAsync, which is not allowed.",
+                            data.ToString()));
+                }
                 else
                 {
                     alreadBeingDestroyed = true;
@@ -801,7 +1043,7 @@ namespace Orleans.Runtime
             logger.Info(ErrorCode.Catalog_ShutdownActivations_2,
                 "DeactivateActivationOnIdle: {0} {1}.", data.ToString(), promptly ? "promptly" : (alreadBeingDestroyed ? "already being destroyed or invalid" : "later when become idle"));
 
-            CounterStatistic.FindOrCreate(StatisticNames.CATALOG_ACTIVATION_SHUTDOWN_VIA_DEACTIVATE_ON_IDLE).Increment();
+            CounterStatistic.FindOrCreate(statisticName).Increment();
             if (promptly)
             {
                 DestroyActivationVoid(data); // Don't await or Ignore, since we are in this activation context and it may have alraedy been destroyed!
@@ -953,7 +1195,7 @@ namespace Orleans.Runtime
                 foreach (var activation in list)
                 {
                     var activationData = activation; // Capture loop variable
-                    var task = scheduler.RunOrQueueTask(() => CallGrainDeactivateAndCleanupStreams(activationData), new SchedulingContext(activationData));
+                    var task = scheduler.RunOrQueueTask(() => CallGrainDeactivateAndCleanupStreams(activationData), activationData.SchedulingContext);
                     tasks2.Add(new Tuple<Task, ActivationData>(task, activationData));
                 }
                 var asyncQueue = new AsyncBatchedContinuationQueue<ActivationData>();
@@ -978,13 +1220,13 @@ namespace Orleans.Runtime
                 try
                 {            
                     List<ActivationAddress> activationsToDeactivate = list.
-                        Where((ActivationData d) => !d.IsStatelessWorker).
+                        Where((ActivationData d) => d.IsUsingGrainDirectory).
                         Select((ActivationData d) => ActivationAddress.GetAddress(LocalSilo, d.Grain, d.ActivationId)).ToList();
 
                     if (activationsToDeactivate.Count > 0)
                     {
                         await scheduler.RunOrQueueTask(() =>
-                            directory.UnregisterManyAsync(activationsToDeactivate),
+                            directory.UnregisterManyAsync(activationsToDeactivate, UnregistrationCause.Force),
                             SchedulingContext);
                     }
                 }
@@ -996,6 +1238,7 @@ namespace Orleans.Runtime
                 // step 4 - UnregisterMessageTarget and OnFinishedGrainDeactivate
                 foreach (var activationData in list)
                 {
+                    Grain grainInstance = activationData.GrainInstance;
                     try
                     {
                         lock (activationData)
@@ -1017,6 +1260,13 @@ namespace Orleans.Runtime
                         directory.InvalidateCacheEntry(activationData.Address);
 
                         RerouteAllQueuedMessages(activationData, null, "Finished Destroy Activation");
+                        if (grainInstance != null)
+                        {
+                            lock (activationData)
+                            {
+                                grainCreator.Release(activationData, grainInstance);
+                            }
+                        }
                     }
                     catch (Exception exc)
                     {
@@ -1042,13 +1292,18 @@ namespace Orleans.Runtime
                 if (msgs == null || msgs.Count <= 0) return;
 
                 if (logger.IsVerbose) logger.Verbose(ErrorCode.Catalog_RerouteAllQueuedMessages, String.Format("RerouteAllQueuedMessages: {0} msgs from Invalid activation {1}.", msgs.Count(), activation));
-                dispatcher.ProcessRequestsToInvalidActivation(msgs, activation.Address, forwardingAddress, failedOperation, exc);
+                this.Dispatcher.ProcessRequestsToInvalidActivation(msgs, activation.Address, forwardingAddress, failedOperation, exc);
             }
         }
 
         private async Task CallGrainActivate(ActivationData activation, Dictionary<string, object> requestContextData)
         {
             var grainTypeName = activation.GrainInstanceType.FullName;
+
+            if (activation.GrainInstance is ILogConsistencyProtocolParticipant)
+            {
+                await ((ILogConsistencyProtocolParticipant)activation.GrainInstance).PreActivateProtocolParticipant();
+            }
 
             // Note: This call is being made from within Scheduler.Queue wrapper, so we are already executing on worker thread
             if (logger.IsVerbose) logger.Verbose(ErrorCode.Catalog_BeforeCallingActivate, "About to call {1} grain's OnActivateAsync() method {0}", activation, grainTypeName);
@@ -1072,19 +1327,24 @@ namespace Orleans.Runtime
                         activation.RunOnInactive();
                     }
                     // Run message pump to see if there is a new request is queued to be processed
-                    dispatcher.RunMessagePump(activation);
+                    this.Dispatcher.RunMessagePump(activation);
                 }
             }
             catch (Exception exc)
             {
                 logger.Error(ErrorCode.Catalog_ErrorCallingActivate,
-                    string.Format("Error calling grain's AsyncActivate method - Grain type = {1} Activation = {0}", activation, grainTypeName), exc);
+                    string.Format("Error calling grain's OnActivateAsync() method - Grain type = {1} Activation = {0}", activation, grainTypeName), exc);
 
                 activation.SetState(ActivationState.Invalid); // Mark this activation as unusable
 
                 activationsFailedToActivate.Increment();
 
                 throw;
+            }
+
+            if (activation.GrainInstance is ILogConsistencyProtocolParticipant)
+            {
+                await ((ILogConsistencyProtocolParticipant)activation.GrainInstance).PostActivateProtocolParticipant();
             }
         }
 
@@ -1127,6 +1387,11 @@ namespace Orleans.Runtime
                         logger.Warn(ErrorCode.Catalog_DeactivateStreamResources_Exception, String.Format("DeactivateStreamResources Grain type = {0} Activation = {1} failed.", grainTypeName, activation), exc);
                     }
                 }
+
+                if (activation.GrainInstance is ILogConsistencyProtocolParticipant)
+                {
+                    await ((ILogConsistencyProtocolParticipant)activation.GrainInstance).DeactivateProtocolParticipant();
+                }
             }
             catch(Exception exc)
             {
@@ -1138,15 +1403,16 @@ namespace Orleans.Runtime
         private async Task RegisterActivationInGrainDirectoryAndValidate(ActivationData activation)
         {
             ActivationAddress address = activation.Address;
-            bool singleActivationMode = !activation.IsStatelessWorker;
-
-            if (singleActivationMode)
+            // Currently, the only grain type that is not registered in the Grain Directory is StatelessWorker. 
+            // Among those that are registered in the directory, we currently do not have any multi activations.
+            if (activation.IsUsingGrainDirectory)
             {
-                ActivationAddress returnedAddress = await scheduler.RunOrQueueTask(() => directory.RegisterSingleActivationAsync(address), this.SchedulingContext);
-                if (address.Equals(returnedAddress)) return;
-
+                
+                var result = await scheduler.RunOrQueueTask(() => directory.RegisterAsync(address, singleActivation:true), this.SchedulingContext);
+                if (address.Equals(result.Address)) return;
+               
                 SiloAddress primaryDirectoryForGrain = directory.GetPrimaryForGrain(address.Grain);
-                throw new DuplicateActivationException(returnedAddress, primaryDirectoryForGrain);
+                throw new DuplicateActivationException(result.Address, primaryDirectoryForGrain);
             }
             else
             {
@@ -1162,17 +1428,17 @@ namespace Orleans.Runtime
                     throw new DuplicateActivationException(id);
                 }
             }
-            // We currently don't have any other case for multiple activations except for StatelessWorker.
-            //await scheduler.RunOrQueueTask(() => directory.RegisterAsync(address), this.SchedulingContext);
+            // We currently don't have any other case for multiple activations except for StatelessWorker. 
         }
 
-        #endregion
-        #region Activations - private
+#endregion
+#region Activations - private
 
         /// <summary>
         /// Invoke the activate method on a newly created activation
         /// </summary>
         /// <param name="activation"></param>
+        /// <param name="requestContextData"></param>
         /// <returns></returns>
         private Task InvokeActivate(ActivationData activation, Dictionary<string, object> requestContextData)
         {
@@ -1181,20 +1447,17 @@ namespace Orleans.Runtime
             {
                 activation.SetState(ActivationState.Activating);
             }
-            return scheduler.QueueTask(() => CallGrainActivate(activation, requestContextData), new SchedulingContext(activation)); // Target grain's scheduler context);
+            return scheduler.QueueTask(() => CallGrainActivate(activation, requestContextData), activation.SchedulingContext); // Target grain's scheduler context);
             // ActivationData will transition out of ActivationState.Activating via Dispatcher.OnActivationCompletedRequest
         }
-        #endregion
-        #region IPlacementContext
+#endregion
+#region IPlacementRuntime
 
-        public TraceLogger Logger
-        {
-            get { return logger; }
-        }
+        public Logger Logger => logger;
 
-        public bool FastLookup(GrainId grain, out List<ActivationAddress> addresses)
+        public bool FastLookup(GrainId grain, out AddressesAndTag addresses)
         {
-            return directory.LocalLookup(grain, out addresses) && addresses != null && addresses.Count > 0;
+            return directory.LocalLookup(grain, out addresses) && addresses.Addresses != null && addresses.Addresses.Count > 0;
             // NOTE: only check with the local directory cache.
             // DO NOT check in the local activations TargetDirectory!!!
             // The only source of truth about which activation should be legit to is the state of the ditributed directory.
@@ -1203,10 +1466,16 @@ namespace Orleans.Runtime
             // thus volaiting the single-activation semantics and not converging even eventualy!
         }
 
-        public Task<List<ActivationAddress>> FullLookup(GrainId grain)
+        public Task<AddressesAndTag> FullLookup(GrainId grain)
         {
-            return scheduler.RunOrQueueTask(() => directory.FullLookup(grain), this.SchedulingContext);
+            return scheduler.RunOrQueueTask(() => directory.LookupAsync(grain), this.SchedulingContext);
         }
+
+        public Task<AddressesAndTag> LookupInCluster(GrainId grain, string clusterId)
+        {
+            return scheduler.RunOrQueueTask(() => directory.LookupInCluster(grain, clusterId), this.SchedulingContext);
+        }
+
 
         public bool LocalLookup(GrainId grain, out List<ActivationData> addresses)
         {
@@ -1226,15 +1495,22 @@ namespace Orleans.Runtime
             }
         }
 
-        #endregion
-        #region Implementation of ICatalog
+        public SiloStatus LocalSiloStatus
+        {
+            get {
+                return SiloStatusOracle.CurrentStatus;
+            }
+        }
+
+#endregion
+#region Implementation of ICatalog
 
         public Task CreateSystemGrain(GrainId grainId, string grainType)
         {
             ActivationAddress target = ActivationAddress.NewActivationAddress(LocalSilo, grainId);
             Task activatedPromise;
             GetOrCreateActivation(target, true, grainType, null, null, out activatedPromise);
-            return activatedPromise ?? TaskDone.Done;
+            return activatedPromise ?? Task.CompletedTask;
         }
 
 
@@ -1256,9 +1532,9 @@ namespace Orleans.Runtime
             return datas;
         }
 
-        #endregion
+#endregion
 
-        #region Implementation of ISiloStatusListener
+#region Implementation of ISiloStatusListener
 
         public void SiloStatusChangeNotification(SiloAddress updatedSilo, SiloStatus status)
         {
@@ -1272,7 +1548,7 @@ namespace Orleans.Runtime
             if (!status.IsTerminating()) return;
             if (status == SiloStatus.Dead)
             {
-                RuntimeClient.Current.BreakOutstandingMessagesToDeadSilo(updatedSilo);
+                this.RuntimeClient.BreakOutstandingMessagesToDeadSilo(updatedSilo);
             }
 
             var activationsToShutdown = new List<ActivationData>();
@@ -1286,6 +1562,7 @@ namespace Orleans.Runtime
                         try
                         {
                             var activationData = activation.Value;
+                            if (!activationData.IsUsingGrainDirectory) continue;
                             if (!directory.GetPrimaryForGrain(activationData.Grain).Equals(updatedSilo)) continue;
 
                             lock (activationData)
@@ -1316,6 +1593,6 @@ namespace Orleans.Runtime
             }
         }
 
-        #endregion
+#endregion
     }
 }

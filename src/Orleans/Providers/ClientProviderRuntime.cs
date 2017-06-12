@@ -1,9 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
-using Orleans.Streams;
-
+using Microsoft.Extensions.DependencyInjection;
 using Orleans.Runtime;
+using Orleans.Streams;
 
 namespace Orleans.Providers
 {
@@ -15,26 +15,40 @@ namespace Orleans.Providers
         private StreamDirectory streamDirectory;
         private readonly Dictionary<Type, Tuple<IGrainExtension, IAddressable>> caoTable;
         private readonly AsyncLock lockable;
+        private InvokeInterceptor invokeInterceptor;
+        private readonly IInternalGrainFactory grainFactory;
+        private readonly IRuntimeClient runtimeClient;
 
-        public ClientProviderRuntime(IGrainFactory grainFactory, IServiceProvider serviceProvider) 
+        public ClientProviderRuntime(IInternalGrainFactory grainFactory, IServiceProvider serviceProvider) 
         {
+            this.grainFactory = grainFactory;
+            this.ServiceProvider = serviceProvider;
+            this.runtimeClient = serviceProvider.GetService<IRuntimeClient>();
             caoTable = new Dictionary<Type, Tuple<IGrainExtension, IAddressable>>();
             lockable = new AsyncLock();
-            GrainFactory = grainFactory;
-            ServiceProvider = serviceProvider;
         }
 
-        public IGrainFactory GrainFactory { get; private set; }
-        public IServiceProvider ServiceProvider { get; private set; }
+        public IGrainFactory GrainFactory => this.grainFactory;
+        public IServiceProvider ServiceProvider { get; }
+
+        public void SetInvokeInterceptor(InvokeInterceptor interceptor)
+        {
+            this.invokeInterceptor = interceptor;
+        }
+
+        public InvokeInterceptor GetInvokeInterceptor()
+        {
+            return this.invokeInterceptor;
+        }
 
         public void StreamingInitialize(ImplicitStreamSubscriberTable implicitStreamSubscriberTable) 
         {
             if (null == implicitStreamSubscriberTable)
             {
-                throw new ArgumentNullException("implicitStreamSubscriberTable");
+                throw new ArgumentNullException(nameof(implicitStreamSubscriberTable));
             }
             grainBasedPubSub = new GrainBasedPubSubRuntime(GrainFactory);
-            var tmp = new ImplicitStreamPubSub(implicitStreamSubscriberTable);
+            var tmp = new ImplicitStreamPubSub(this.grainFactory, implicitStreamSubscriberTable);
             implictPubSub = tmp;
             combinedGrainBasedAndImplicitPubSub = new StreamPubSubImpl(grainBasedPubSub, tmp);
             streamDirectory = new StreamDirectory();
@@ -45,19 +59,22 @@ namespace Orleans.Providers
             return streamDirectory;
         }
 
-        public async Task Reset()
+        public async Task Reset(bool cleanup = true)
         {
             if (streamDirectory != null)
             {
                 var tmp = streamDirectory;
                 streamDirectory = null; // null streamDirectory now, just to make sure we call cleanup only once, in all cases.
-                await tmp.Cleanup(true, true);
+                if (cleanup)
+                {
+                    await tmp.Cleanup(true, true);
+                }
             }
         }
 
         public Logger GetLogger(string loggerName)
         {
-            return TraceLogger.GetLogger(loggerName, TraceLogger.LoggerType.Provider);
+            return LogManager.GetLogger(loggerName, LoggerType.Provider);
         }
 
         public Guid ServiceId
@@ -83,7 +100,7 @@ namespace Orleans.Providers
 
         public string ExecutingEntityIdentity()
         {
-            return RuntimeClient.Current.Identity;
+            return this.runtimeClient.CurrentActivationIdentity;
         }
 
         public SiloAddress ExecutingSiloAddress
@@ -96,7 +113,7 @@ namespace Orleans.Providers
             throw new NotImplementedException();
         }
 
-        public void UnRegisterSystemTarget(ISystemTarget target)
+        public void UnregisterSystemTarget(ISystemTarget target)
         {
             throw new NotImplementedException();
         }
@@ -124,10 +141,10 @@ namespace Orleans.Providers
                 else
                 { 
                     extension = newExtensionFunc();
-                    var obj = ((Orleans.GrainFactory)this.GrainFactory).CreateObjectReference<TExtensionInterface>(extension);
+                    var obj = ((GrainFactory)this.GrainFactory).CreateObjectReference<TExtensionInterface>(extension);
 
-                    addressable = (IAddressable) await (Task<TExtensionInterface>) obj;
-
+                    addressable = obj;
+                     
                     if (null == addressable)
                     {
                         throw new NullReferenceException("addressable");
@@ -161,13 +178,6 @@ namespace Orleans.Providers
         public IConsistentRingProviderForGrains GetConsistentRingProvider(int mySubRangeIndex, int numSubRanges)
         {
             throw new NotImplementedException("GetConsistentRingProvider");
-        }
-
-        public bool InSilo { get { return false; } }
-
-        public object GetCurrentSchedulingContext()
-        {
-            return null;
         }
     }
 }

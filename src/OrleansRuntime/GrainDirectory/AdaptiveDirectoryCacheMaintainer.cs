@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
-
 using Orleans.Runtime.Scheduler;
 
 
@@ -14,14 +13,22 @@ namespace Orleans.Runtime.GrainDirectory
 
         private readonly AdaptiveGrainDirectoryCache<TValue> cache;
         private readonly LocalGrainDirectory router;
+        private readonly Func<List<ActivationAddress>, TValue> updateFunc;
+        private readonly IInternalGrainFactory grainFactory;
 
         private long lastNumAccesses;       // for stats
         private long lastNumHits;           // for stats
 
-        internal AdaptiveDirectoryCacheMaintainer(ILocalGrainDirectory router, IGrainDirectoryCache<TValue> cache) 
+        internal AdaptiveDirectoryCacheMaintainer(
+            LocalGrainDirectory router,
+            AdaptiveGrainDirectoryCache<TValue> cache,
+            Func<List<ActivationAddress>, TValue> updateFunc,
+            IInternalGrainFactory grainFactory)
         {
-            this.router = (LocalGrainDirectory)router;
-            this.cache = (AdaptiveGrainDirectoryCache<TValue>) cache;
+            this.updateFunc = updateFunc;
+            this.grainFactory = grainFactory;
+            this.router = router;
+            this.cache = cache;
             
             lastNumAccesses = 0;
             lastNumHits = 0;
@@ -88,7 +95,7 @@ namespace Orleans.Runtime.GrainDirectory
                         }
                         else if (entry.NumAccesses == 0)
                         {
-                            // 2. If the entry is expired and was not acccessed in the last time interval -- throw it away
+                            // 2. If the entry is expired and was not accessed in the last time interval -- throw it away
                             cache.Remove(grain);            // for debug
                             cnt3++;
                         }
@@ -129,7 +136,7 @@ namespace Orleans.Runtime.GrainDirectory
 
                 router.CacheValidationsSent.Increment();
                 // Send all of the items in one large request
-                var validator = InsideRuntimeClient.Current.InternalGrainFactory.GetSystemTarget<IRemoteGrainDirectory>(Constants.DirectoryCacheValidatorId, capture);
+                var validator = this.grainFactory.GetSystemTarget<IRemoteGrainDirectory>(Constants.DirectoryCacheValidatorId, capture);
                                 
                 router.Scheduler.QueueTask(async () =>
                 {
@@ -142,23 +149,21 @@ namespace Orleans.Runtime.GrainDirectory
         }
 
         private void ProcessCacheRefreshResponse(
-            SiloAddress silo, 
-            IReadOnlyCollection<Tuple<GrainId, int, List<Tuple<SiloAddress, ActivationId>>>> refreshResponse)
+            SiloAddress silo,
+            IReadOnlyCollection<Tuple<GrainId, int, List<ActivationAddress>>> refreshResponse)
         {
             if (Log.IsVerbose2) Log.Verbose2("Silo {0} received ProcessCacheRefreshResponse. #Response entries {1}.", router.MyAddress, refreshResponse.Count);
 
             int cnt1 = 0, cnt2 = 0, cnt3 = 0;
 
-            //TODO: this is unsafe in case TValue changes in the future as it assumes List<Tuple<SiloAddress, ActivationId>>
-            var cacheRef = cache as AdaptiveGrainDirectoryCache<List<Tuple<SiloAddress, ActivationId>>>; 
-
             // pass through returned results and update the cache if needed
-            foreach (Tuple<GrainId, int, List<Tuple<SiloAddress, ActivationId>>> tuple in refreshResponse)
+            foreach (Tuple<GrainId, int, List<ActivationAddress>> tuple in refreshResponse)
             {
                 if (tuple.Item3 != null)
                 {
                     // the server returned an updated entry
-                    cacheRef.AddOrUpdate(tuple.Item1, tuple.Item3, tuple.Item2);
+                    var updated = updateFunc(tuple.Item3);
+                    cache.AddOrUpdate(tuple.Item1, updated, tuple.Item2);
                     cnt1++;
                 }
                 else if (tuple.Item2 == -1)

@@ -5,25 +5,23 @@ namespace Orleans.Serialization
     using System.Collections.Generic;
     using System.Linq.Expressions;
     using System.Reflection;
-
     using Bond;
     using Runtime;
-
-    using BondBinaryWriter = Bond.Protocols.SimpleBinaryWriter<Orleans.Serialization.OutputStream>;
-    using BondTypeSerializer = Bond.Serializer<Bond.Protocols.SimpleBinaryWriter<Orleans.Serialization.OutputStream>>;
     using BondBinaryReader = Bond.Protocols.SimpleBinaryReader<Orleans.Serialization.InputStream>;
+    using BondBinaryWriter = Bond.Protocols.SimpleBinaryWriter<Orleans.Serialization.OutputStream>;
     using BondTypeDeserializer = Bond.Deserializer<Bond.Protocols.SimpleBinaryReader<Orleans.Serialization.InputStream>>;
+    using BondTypeSerializer = Bond.Serializer<Bond.Protocols.SimpleBinaryWriter<Orleans.Serialization.OutputStream>>;
 
     /// <summary>
     /// An implementation of IExternalSerializer for usage with Bond types.
     /// </summary>
     public class BondSerializer : IExternalSerializer
     {
-        private static readonly ConcurrentDictionary<RuntimeTypeHandle, ClonerInfo> ClonerInfoDictionary = new ConcurrentDictionary<RuntimeTypeHandle, ClonerInfo>();
-        private static readonly ConcurrentDictionary<RuntimeTypeHandle, BondTypeSerializer> SerializerDictionary = new ConcurrentDictionary<RuntimeTypeHandle, BondTypeSerializer>();
-        private static readonly ConcurrentDictionary<RuntimeTypeHandle, BondTypeDeserializer> DeserializerDictionary = new ConcurrentDictionary<RuntimeTypeHandle, BondTypeDeserializer>();
+        private static ConcurrentDictionary<RuntimeTypeHandle, ClonerInfo> ClonerInfoDictionary;
+        private static ConcurrentDictionary<RuntimeTypeHandle, BondTypeSerializer> SerializerDictionary;
+        private static ConcurrentDictionary<RuntimeTypeHandle, BondTypeDeserializer> DeserializerDictionary;
 
-        private TraceLogger logger;
+        private Logger logger;
 
         /// <summary>
         /// Determines whether this serializer has the ability to serialize a particular type.
@@ -37,12 +35,13 @@ namespace Orleans.Serialization
                 return true;
             }
 
-            if (itemType.IsGenericType && itemType.IsConstructedGenericType == false)
+            var typeInfo = itemType.GetTypeInfo();
+            if (typeInfo.IsGenericType && itemType.IsConstructedGenericType == false)
             {
                 return false;
             }
 
-            if (itemType.GetCustomAttribute<SchemaAttribute>() == null)
+            if (typeInfo.GetCustomAttribute<SchemaAttribute>() == null)
             {
                 return false;
             }
@@ -51,12 +50,8 @@ namespace Orleans.Serialization
             return true;
         }
 
-        /// <summary>
-        /// Creates a deep copy of an object
-        /// </summary>
-        /// <param name="source">The source object to be copy</param>
-        /// <returns>The copy that was created</returns>
-        public object DeepCopy(object source)
+        /// <inheritdoc />
+        public object DeepCopy(object source, ICopyContext context)
         {
             if (source == null)
             {
@@ -73,22 +68,17 @@ namespace Orleans.Serialization
             return clonerInfo.Invoke(source);
         }
 
-        /// <summary>
-        /// Deserializes an object from a binary stream
-        /// </summary>
-        /// <param name="expectedType">The type that is expected to be deserialized</param>
-        /// <param name="reader">The <see cref="BinaryTokenStreamReader"/></param>
-        /// <returns>The deserialized object</returns>
-        public object Deserialize(Type expectedType, BinaryTokenStreamReader reader)
+        /// <inheritdoc />
+        public object Deserialize(Type expectedType, IDeserializationContext context)
         {
             if (expectedType == null)
             {
-                throw new ArgumentNullException("reader");
+                throw new ArgumentNullException(nameof(expectedType));
             }
 
-            if (reader == null)
+            if (context == null)
             {
-                throw new ArgumentNullException("stream");
+                throw new ArgumentNullException(nameof(context));
             }
 
             var typeHandle = expectedType.TypeHandle;
@@ -99,33 +89,29 @@ namespace Orleans.Serialization
                 throw new ArgumentOutOfRangeException("no deserializer provided for the selected type", "expectedType");
             }
 
-            var inputStream = InputStream.Create(reader);
+            var inputStream = InputStream.Create(context.StreamReader);
             var bondReader = new BondBinaryReader(inputStream);
             return deserializer.Deserialize(bondReader);
         }
 
-        /// <summary>
-        /// Initializes the external serializer
-        /// </summary>
-        /// <param name="logger">The logger to use to capture any serialization events</param>
-        public void Initialize(TraceLogger logger)
+        /// <inheritdoc />
+        public void Initialize(Logger logger)
         {
+            ClonerInfoDictionary = new ConcurrentDictionary<RuntimeTypeHandle, ClonerInfo>();
+            SerializerDictionary = new ConcurrentDictionary<RuntimeTypeHandle, BondTypeSerializer>();
+            DeserializerDictionary = new ConcurrentDictionary<RuntimeTypeHandle, BondTypeDeserializer>();
             this.logger = logger;
         }
 
-        /// <summary>
-        /// Serializes an object to a binary stream
-        /// </summary>
-        /// <param name="item">The object to serialize</param>
-        /// <param name="writer">The <see cref="BinaryTokenStreamWriter"/></param>
-        /// <param name="expectedType">The type the deserializer should expect</param>
-        public void Serialize(object item, BinaryTokenStreamWriter writer, Type expectedType)
+        /// <inheritdoc />
+        public void Serialize(object item, ISerializationContext context, Type expectedType)
         {
-            if (writer == null)
+            if (context == null)
             {
-                throw new ArgumentNullException("writer");
+                throw new ArgumentNullException(nameof(context));
             }
 
+            var writer = context.StreamWriter;
             if (item == null)
             {
                 writer.WriteNull();

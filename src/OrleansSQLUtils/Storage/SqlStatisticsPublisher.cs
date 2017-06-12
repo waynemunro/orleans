@@ -1,10 +1,11 @@
-using Orleans.Runtime;
-using Orleans.Runtime.Configuration;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
+using Orleans.Runtime;
+using Orleans.Runtime.Configuration;
 using Orleans.SqlUtils;
 
 
@@ -26,7 +27,8 @@ namespace Orleans.Providers.SqlServer
         private long generation;                
         private RelationalOrleansQueries orleansQueries;
         private Logger logger;
-        
+        private IGrainReferenceConverter grainReferenceConverter;
+
         /// <summary>
         /// Name of the provider
         /// </summary>
@@ -43,12 +45,13 @@ namespace Orleans.Providers.SqlServer
         {
             Name = name;
             logger = providerRuntime.GetLogger("SqlStatisticsPublisher");
+            this.grainReferenceConverter = providerRuntime.ServiceProvider.GetRequiredService<IGrainReferenceConverter>();
 
             string adoInvariant = AdoNetInvariants.InvariantNameSqlServer;
             if (config.Properties.ContainsKey("AdoInvariant"))
                 adoInvariant = config.Properties["AdoInvariant"];
 
-            orleansQueries = await RelationalOrleansQueries.CreateInstance(adoInvariant, config.Properties["ConnectionString"]);
+            orleansQueries = await RelationalOrleansQueries.CreateInstance(adoInvariant, config.Properties["ConnectionString"], this.grainReferenceConverter);
         }
 
         /// <summary>
@@ -57,7 +60,7 @@ namespace Orleans.Providers.SqlServer
         /// <returns>Resolved task</returns>
         public Task Close()
         {
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         /// <summary>
@@ -100,10 +103,9 @@ namespace Orleans.Providers.SqlServer
             }
         }
 
-
         async Task IClientMetricsDataPublisher.Init(ClientConfiguration config, IPAddress address, string clientId)
         {
-            orleansQueries = await RelationalOrleansQueries.CreateInstance(config.AdoInvariant, config.DataConnectionString);
+            orleansQueries = await RelationalOrleansQueries.CreateInstance(config.AdoInvariant, config.DataConnectionString, this.grainReferenceConverter);
         }
 
         /// <summary>
@@ -111,12 +113,12 @@ namespace Orleans.Providers.SqlServer
         /// </summary>
         /// <param name="metricsData">Metrics data</param>
         /// <returns>Task for database operation</returns>
-        public Task ReportMetrics(IClientPerformanceMetrics metricsData)
+        public async Task ReportMetrics(IClientPerformanceMetrics metricsData)
         {
             if(logger != null && logger.IsVerbose3) logger.Verbose3("SqlStatisticsPublisher.ReportMetrics (client) called with data: {0}.", metricsData);
             try
             {
-                return orleansQueries.UpsertReportClientMetricsAsync(deploymentId, clientId, clientAddress, hostName, metricsData);
+                await orleansQueries.UpsertReportClientMetricsAsync(deploymentId, clientId, clientAddress, hostName, metricsData);
             }
             catch(Exception ex)
             {
@@ -128,7 +130,7 @@ namespace Orleans.Providers.SqlServer
 
         Task ISiloMetricsDataPublisher.Init(string deploymentId, string storageConnectionString, SiloAddress siloAddress, string siloName, IPEndPoint gateway, string hostName)
         {
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         /// <summary>
@@ -136,12 +138,12 @@ namespace Orleans.Providers.SqlServer
         /// </summary>
         /// <param name="metricsData">Metrics data</param>
         /// <returns>Task for database operation</returns>
-        public Task ReportMetrics(ISiloPerformanceMetrics metricsData)
+        public async Task ReportMetrics(ISiloPerformanceMetrics metricsData)
         {
             if (logger != null && logger.IsVerbose3) logger.Verbose3("SqlStatisticsPublisher.ReportMetrics (silo) called with data: {0}.", metricsData);
             try
             {
-                return orleansQueries.UpsertSiloMetricsAsync(deploymentId, siloName, gateway, siloAddress, hostName, metricsData);
+                await orleansQueries.UpsertSiloMetricsAsync(deploymentId, siloName, gateway, siloAddress, hostName, metricsData);
             }
             catch(Exception ex)
             {
@@ -153,7 +155,7 @@ namespace Orleans.Providers.SqlServer
 
         Task IStatisticsPublisher.Init(bool isSilo, string storageConnectionString, string deploymentId, string address, string siloName, string hostName)
         {
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         /// <summary>
@@ -203,9 +205,9 @@ namespace Orleans.Providers.SqlServer
         /// <param name="counters">The counters to batch.</param>
         /// <param name="maxBatchSizeInclusive">The maximum size of one batch.</param>
         /// <returns>The counters batched.</returns>
-        private static List<IList<ICounter>> BatchCounters(List<ICounter> counters, int maxBatchSizeInclusive)
+        private static List<List<ICounter>> BatchCounters(List<ICounter> counters, int maxBatchSizeInclusive)
         {
-            var batches = new List<IList<ICounter>>();
+            var batches = new List<List<ICounter>>();
             for(int i = 0; i < counters.Count; i += maxBatchSizeInclusive)
             {
                 batches.Add(counters.GetRange(i, Math.Min(maxBatchSizeInclusive, counters.Count - i)));

@@ -1,10 +1,75 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 
 namespace Orleans.Serialization
 {
+    public interface ISerializerContext
+    {
+        /// <summary>
+        /// Gets the serialization manager.
+        /// </summary>
+        SerializationManager SerializationManager { get; }
+
+        /// <summary>
+        /// Gets the service provider.
+        /// </summary>
+        IServiceProvider ServiceProvider { get; }
+        
+        /// <summary>
+        /// Gets additional context associated with this instance.
+        /// </summary>
+        object AdditionalContext { get; }
+    }
+
+    public interface ICopyContext : ISerializerContext
+    {
+        /// <summary>
+        /// Record an object-to-copy mapping into the current serialization context.
+        /// Used for maintaining the .NET object graph during serialization operations.
+        /// Used in generated code.
+        /// </summary>
+        /// <param name="original">Original object.</param>
+        /// <param name="copy">Copy object that will be the serialized form of the original.</param>
+        void RecordCopy(object original, object copy);
+
+        object CheckObjectWhileCopying(object raw);
+    }
+
+    public interface ISerializationContext : ISerializerContext
+    {
+        /// <summary>
+        /// Gets the stream writer.
+        /// </summary>
+        BinaryTokenStreamWriter StreamWriter { get; }
+        
+        /// <summary>
+        /// Records the provided object at the specified offset into <see cref="StreamWriter"/>.
+        /// </summary>
+        /// <param name="original"></param>
+        /// <param name="offset"></param>
+        void RecordObject(object original, int offset);
+
+        int CheckObjectWhileSerializing(object raw);
+
+        int CurrentOffset { get; }
+    }
+
+    public static class SerializationContextExtensions
+    {
+        public static void RecordObject(this ISerializationContext context, object original)
+        {
+            context.RecordObject(original, context.CurrentOffset);
+        }
+
+        public static ISerializationContext CreateNestedContext(
+            this ISerializationContext context,
+            int position,
+            BinaryTokenStreamWriter writer)
+        {
+            return new SerializationContext.NestedSerializationContext(context, position, writer);
+        }
+    }
+
     /// <summary>
     /// Maintains context information for current thread during serialization operations.
     /// </summary>
@@ -13,19 +78,8 @@ namespace Orleans.Serialization
     /// record the mapping of original object to the copied instance of that object
     /// so that object identity can be preserved when serializing .NET object graphs.
     /// </remarks>
-    public class SerializationContext
+    public class SerializationContext : ICopyContext, ISerializationContext
     {
-        [ThreadStatic]
-        private static SerializationContext ctx;
-
-        /// <summary>
-        /// The current serialization context in use for this thread.
-        /// Used in generated code.
-        /// </summary>
-        public static SerializationContext Current {
-            get { return ctx ?? (ctx = new SerializationContext()); }
-        }
-
         private struct Record
         {
             public readonly object Copy;
@@ -44,31 +98,19 @@ namespace Orleans.Serialization
             }
         }
 
+        /// <summary>
+        /// Gets the serialization manager.
+        /// </summary>
+        public SerializationManager SerializationManager { get; }
+
+        public BinaryTokenStreamWriter StreamWriter { get; set; }
+
         private readonly Dictionary<object, Record> processedObjects;
 
-        private class ReferenceEqualsComparer : EqualityComparer<object>
+        public SerializationContext(SerializationManager serializationManager)
         {
-            /// <summary>
-            /// Defines object equality by reference equality (eq, in LISP).
-            /// </summary>
-            /// <returns>
-            /// true if the specified objects are equal; otherwise, false.
-            /// </returns>
-            /// <param name="x">The first object to compare.</param><param name="y">The second object to compare.</param>
-            public override bool Equals(object x, object y)
-            {
-                return object.ReferenceEquals(x, y);
-            }
-
-            public override int GetHashCode(object obj)
-            {
-                return obj == null ? 0 : obj.GetHashCode();
-            }
-        }
-
-        private SerializationContext()
-        {
-            processedObjects = new Dictionary<object, Record>(new ReferenceEqualsComparer());
+            this.SerializationManager = serializationManager;
+            processedObjects = new Dictionary<object, Record>(ReferenceEqualsComparer.Instance);
         }
 
         internal void Reset()
@@ -83,7 +125,7 @@ namespace Orleans.Serialization
         /// </summary>
         /// <param name="original">Original object.</param>
         /// <param name="copy">Copy object that will be the serialized form of the original.</param>
-        public void RecordObject(object original, object copy)
+        public void RecordCopy(object original, object copy)
         {
             if (!processedObjects.ContainsKey(original))
             {
@@ -91,13 +133,13 @@ namespace Orleans.Serialization
             }
         }
 
-        internal void RecordObject(object original, int offset)
+        public void RecordObject(object original, int offset)
         {
             processedObjects[original] = new Record(offset);
         }
 
         // Returns an object suitable for insertion if this is a back-reference, or null if it's new
-        internal object CheckObjectWhileCopying(object raw)
+        public object CheckObjectWhileCopying(object raw)
         {
             Record record;
             bool found = processedObjects.TryGetValue(raw, out record);
@@ -110,7 +152,7 @@ namespace Orleans.Serialization
         }
 
         // Returns an offset where the first version of this object was seen, or -1 if it's new
-        internal int CheckObjectWhileSerializing(object raw)
+        public int CheckObjectWhileSerializing(object raw)
         {
             Record record;
             bool found = processedObjects.TryGetValue(raw, out record);
@@ -120,6 +162,39 @@ namespace Orleans.Serialization
             }
 
             return -1;
+        }
+
+        public int CurrentOffset => this.StreamWriter.CurrentOffset;
+
+        public IServiceProvider ServiceProvider => this.SerializationManager.ServiceProvider;
+
+        public object AdditionalContext => this.SerializationManager.RuntimeClient;
+
+        internal class NestedSerializationContext : ISerializationContext
+        {
+            private readonly int initialOffset;
+            private readonly ISerializationContext parentContext;
+
+            /// <summary>
+            /// Creates a new instance of the <see cref="NestedSerializationContext"/> class.
+            /// </summary>
+            /// <param name="parent">The parent context.</param>
+            /// <param name="offset">The absolute offset at which this stream begins.</param>
+            /// <param name="writer">The writer.</param>
+            public NestedSerializationContext(ISerializationContext parent, int offset, BinaryTokenStreamWriter writer)
+            {
+                this.parentContext = parent;
+                this.initialOffset = offset;
+                this.StreamWriter = writer;
+            }
+
+            public SerializationManager SerializationManager => this.parentContext.SerializationManager;
+            public IServiceProvider ServiceProvider => this.parentContext.ServiceProvider;
+            public object AdditionalContext => this.parentContext.ServiceProvider;
+            public BinaryTokenStreamWriter StreamWriter { get; }
+            public int CurrentOffset => this.initialOffset + this.StreamWriter.CurrentOffset;
+            public void RecordObject(object original, int offset) => this.parentContext.RecordObject(original, offset);
+            public int CheckObjectWhileSerializing(object raw) => this.parentContext.CheckObjectWhileSerializing(raw);
         }
     }
 }

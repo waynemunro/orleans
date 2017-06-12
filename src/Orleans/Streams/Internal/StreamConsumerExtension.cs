@@ -5,6 +5,8 @@ using System.Linq;
 using System.Threading.Tasks;
 using Orleans.Concurrency;
 using Orleans.Runtime;
+using System.Reflection;
+using Orleans.Streams.Core;
 
 namespace Orleans.Streams
 {
@@ -30,10 +32,15 @@ namespace Orleans.Streams
         private readonly IStreamProviderRuntime providerRuntime;
         private readonly ConcurrentDictionary<GuidId, IStreamSubscriptionHandle> allStreamObservers; // map to different ObserversCollection<T> of different Ts.
         private readonly Logger logger;
+        private const int MAXIMUM_ITEM_STRING_LOG_LENGTH = 128;
+        // if this extension is attached to a cosnumer grain which implements IOnSubscriptionActioner,
+        // then this will be not null, otherwise, it will be null
+        [NonSerialized]
+        private readonly StreamSubscriptionChangeHandler subscriptionChangeHandler;
 
-
-        internal StreamConsumerExtension(IStreamProviderRuntime providerRt)
+        internal StreamConsumerExtension(IStreamProviderRuntime providerRt, StreamSubscriptionChangeHandler streamSubscriptionChangeHandler = null)
         {
+            this.subscriptionChangeHandler = streamSubscriptionChangeHandler;
             providerRuntime = providerRt;
             allStreamObservers = new ConcurrentDictionary<GuidId, IStreamSubscriptionHandle>();
             logger = providerRuntime.GetLogger(GetType().Name);
@@ -54,46 +61,77 @@ namespace Orleans.Streams
             }
             catch (Exception exc)
             {
-                logger.Error((int)ErrorCode.StreamProvider_AddObserverException, String.Format("{0} StreamConsumerExtension.AddObserver({1}) caugth exception.",
-                    providerRuntime.ExecutingEntityIdentity(), stream.StreamId), exc);
+                logger.Error(ErrorCode.StreamProvider_AddObserverException,
+                    $"{providerRuntime.ExecutingEntityIdentity()} StreamConsumerExtension.AddObserver({stream.StreamId}) caugth exception.", exc);
                 throw;
             }
         }
 
-        internal bool RemoveObserver(GuidId subscriptionId)
+        public bool RemoveObserver(GuidId subscriptionId)
         {
             IStreamSubscriptionHandle ignore;
             return allStreamObservers.TryRemove(subscriptionId, out ignore);
         }
 
-        public Task<StreamHandshakeToken> DeliverItem(GuidId subscriptionId, Immutable<object> item, StreamSequenceToken currentToken, StreamHandshakeToken handshakeToken)
+        public Task<StreamHandshakeToken> DeliverImmutable(GuidId subscriptionId, StreamId streamId, Immutable<object> item, StreamSequenceToken currentToken, StreamHandshakeToken handshakeToken)
         {
-            if (logger.IsVerbose3) logger.Verbose3("DeliverItem {0} for subscription {1}", item.Value, subscriptionId);
+            return DeliverMutable(subscriptionId, streamId, item.Value, currentToken, handshakeToken);
+        }
 
+        public async Task<StreamHandshakeToken> DeliverMutable(GuidId subscriptionId, StreamId streamId, object item, StreamSequenceToken currentToken, StreamHandshakeToken handshakeToken)
+        {
+            if (logger.IsVerbose3)
+            {
+                var itemString = item.ToString();
+                itemString = (itemString.Length > MAXIMUM_ITEM_STRING_LOG_LENGTH) ? itemString.Substring(0, MAXIMUM_ITEM_STRING_LOG_LENGTH) + "..." : itemString;
+                logger.Verbose3("DeliverItem {0} for subscription {1}", itemString, subscriptionId);
+            }
             IStreamSubscriptionHandle observer;
             if (allStreamObservers.TryGetValue(subscriptionId, out observer))
-                return observer.DeliverItem(item.Value, currentToken, handshakeToken);
+            {
+                return await observer.DeliverItem(item, currentToken, handshakeToken);
+            }
+            else if(this.subscriptionChangeHandler != null)
+            {
+                await this.subscriptionChangeHandler.HandleNewSubscription(subscriptionId, streamId, item.GetType());
+                //check if an observer were attached after handling the new subscription, deliver on it if attached
+                if (allStreamObservers.TryGetValue(subscriptionId, out observer))
+                {
+                    return await observer.DeliverItem(item, currentToken, handshakeToken);
+                }
+            }
 
             logger.Warn((int)(ErrorCode.StreamProvider_NoStreamForItem), "{0} got an item for subscription {1}, but I don't have any subscriber for that stream. Dropping on the floor.",
                 providerRuntime.ExecutingEntityIdentity(), subscriptionId);
             // We got an item when we don't think we're the subscriber. This is a normal race condition.
             // We can drop the item on the floor, or pass it to the rendezvous, or ...
-            return Task.FromResult(default(StreamHandshakeToken));
+            return default(StreamHandshakeToken);
         }
 
-        public Task<StreamHandshakeToken> DeliverBatch(GuidId subscriptionId, Immutable<IBatchContainer> batch, StreamHandshakeToken handshakeToken)
+        public async Task<StreamHandshakeToken> DeliverBatch(GuidId subscriptionId, StreamId streamId, Immutable<IBatchContainer> batch, StreamHandshakeToken handshakeToken)
         {
             if (logger.IsVerbose3) logger.Verbose3("DeliverBatch {0} for subscription {1}", batch.Value, subscriptionId);
 
             IStreamSubscriptionHandle observer;
             if (allStreamObservers.TryGetValue(subscriptionId, out observer))
-                return observer.DeliverBatch(batch.Value, handshakeToken);
+            {
+                return await observer.DeliverBatch(batch.Value, handshakeToken);
+            }
+            else if(this.subscriptionChangeHandler != null)
+            {
+                await this.subscriptionChangeHandler.HandleNewSubscription(subscriptionId, streamId, batch.Value.GetType());
+                // check if an observer were attached after handling the new subscription, deliver on it if attached
+                if (allStreamObservers.TryGetValue(subscriptionId, out observer))
+                {
+                    return await observer.DeliverBatch(batch.Value, handshakeToken);
+                }
+            }
 
             logger.Warn((int)(ErrorCode.StreamProvider_NoStreamForBatch), "{0} got an item for subscription {1}, but I don't have any subscriber for that stream. Dropping on the floor.",
                 providerRuntime.ExecutingEntityIdentity(), subscriptionId);
             // We got an item when we don't think we're the subscriber. This is a normal race condition.
             // We can drop the item on the floor, or pass it to the rendezvous, or ...
-            return Task.FromResult(default(StreamHandshakeToken));
+            return default(StreamHandshakeToken);
         }
 
         public Task CompleteStream(GuidId subscriptionId)
@@ -108,7 +146,7 @@ namespace Orleans.Streams
                 providerRuntime.ExecutingEntityIdentity(), subscriptionId);
             // We got an item when we don't think we're the subscriber. This is a normal race condition.
             // We can drop the item on the floor, or pass it to the rendezvous, or ...
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         public Task ErrorInStream(GuidId subscriptionId, Exception exc)
@@ -123,7 +161,7 @@ namespace Orleans.Streams
                 providerRuntime.ExecutingEntityIdentity(), subscriptionId);
             // We got an item when we don't think we're the subscriber. This is a normal race condition.
             // We can drop the item on the floor, or pass it to the rendezvous, or ...
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         public Task<StreamHandshakeToken> GetSequenceToken(GuidId subscriptionId)

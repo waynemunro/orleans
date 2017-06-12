@@ -5,17 +5,16 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
-
-using Orleans.Runtime.Configuration;
 using Orleans.Messaging;
+using Orleans.Runtime.Configuration;
+using Orleans.Serialization;
 
 namespace Orleans.Runtime.Messaging
 {
     internal class Gateway
     {
-        private static readonly TimeSpan TIME_BEFORE_CLIENT_DROP = TimeSpan.FromSeconds(60);
-
         private readonly MessageCenter messageCenter;
+        private readonly MessageFactory messageFactory;
         private readonly GatewayAcceptor acceptor;
         private readonly Lazy<GatewaySender>[] senders;
         private readonly GatewayClientCleanupAgent dropper;
@@ -31,21 +30,25 @@ namespace Orleans.Runtime.Messaging
         private readonly ClientsReplyRoutingCache clientsReplyRoutingCache;
         private ClientObserverRegistrar clientRegistrar;
         private readonly object lockable;
-        private static readonly TraceLogger logger = TraceLogger.GetLogger("Orleans.Messaging.Gateway");
+        private readonly SerializationManager serializationManager;
+
+        private static readonly Logger logger = LogManager.GetLogger("Orleans.Messaging.Gateway");
         
         private IMessagingConfiguration MessagingConfiguration { get { return messageCenter.MessagingConfiguration; } }
         
-        internal Gateway(MessageCenter msgCtr, IPEndPoint gatewayAddress)
+        public Gateway(MessageCenter msgCtr, NodeConfiguration nodeConfig, MessageFactory messageFactory, SerializationManager serializationManager, GlobalConfiguration globalConfig)
         {
             messageCenter = msgCtr;
-            acceptor = new GatewayAcceptor(msgCtr, this, gatewayAddress);
+            this.messageFactory = messageFactory;
+            this.serializationManager = serializationManager;
+            acceptor = new GatewayAcceptor(msgCtr, this, nodeConfig.ProxyGatewayEndpoint, this.messageFactory, this.serializationManager, globalConfig);
             senders = new Lazy<GatewaySender>[messageCenter.MessagingConfiguration.GatewaySenderQueues];
             nextGatewaySenderToUseForRoundRobin = 0;
             dropper = new GatewayClientCleanupAgent(this);
             clients = new ConcurrentDictionary<GrainId, ClientState>();
             clientSockets = new ConcurrentDictionary<Socket, ClientState>();
             clientsReplyRoutingCache = new ClientsReplyRoutingCache(messageCenter.MessagingConfiguration);
-            this.gatewayAddress = SiloAddress.New(gatewayAddress, 0);
+            this.gatewayAddress = SiloAddress.New(nodeConfig.ProxyGatewayEndpoint, 0);
             lockable = new object();
         }
 
@@ -59,7 +62,7 @@ namespace Orleans.Runtime.Messaging
                 int capture = i;
                 senders[capture] = new Lazy<GatewaySender>(() =>
                 {
-                    var sender = new GatewaySender("GatewaySiloSender_" + capture, this);
+                    var sender = new GatewaySender("GatewaySiloSender_" + capture, this, this.messageFactory, this.serializationManager);
                     sender.Start();
                     return sender;
                 }, LazyThreadSafetyMode.ExecutionAndPublication);
@@ -104,7 +107,7 @@ namespace Orleans.Runtime.Messaging
                 {
                     int gatewayToUse = nextGatewaySenderToUseForRoundRobin % senders.Length;
                     nextGatewaySenderToUseForRoundRobin++; // under Gateway lock
-                    clientState = new ClientState(clientId, gatewayToUse);
+                    clientState = new ClientState(clientId, gatewayToUse, MessagingConfiguration.ClientDropTimeout);
                     clients[clientId] = clientState;
                     MessagingStatisticsGroup.ConnectedClientCount.Increment();
                 }
@@ -233,6 +236,7 @@ namespace Orleans.Runtime.Messaging
 
         private class ClientState
         {
+            private readonly TimeSpan clientDropTimeout;
             internal Queue<Message> PendingToSend { get; private set; }
             internal Queue<List<Message>> PendingBatchesToSend { get; private set; }
             internal Socket Socket { get; private set; }
@@ -242,10 +246,11 @@ namespace Orleans.Runtime.Messaging
 
             internal bool IsConnected { get { return Socket != null; } }
 
-            internal ClientState(GrainId id, int gatewaySenderNumber)
+            internal ClientState(GrainId id, int gatewaySenderNumber, TimeSpan clientDropTimeout)
             {
                 Id = id;
                 GatewaySenderNumber = gatewaySenderNumber;
+                this.clientDropTimeout = clientDropTimeout;
                 PendingToSend = new Queue<Message>();
                 PendingBatchesToSend = new Queue<List<Message>>();
             }
@@ -268,7 +273,7 @@ namespace Orleans.Runtime.Messaging
             internal bool ReadyToDrop()
             {
                 return !IsConnected &&
-                       (DateTime.UtcNow.Subtract(DisconnectedSince) >= Gateway.TIME_BEFORE_CLIENT_DROP);
+                       (DateTime.UtcNow.Subtract(DisconnectedSince) >= clientDropTimeout);
             }
         }
 
@@ -290,7 +295,7 @@ namespace Orleans.Runtime.Messaging
                 {
                     gateway.DropDisconnectedClients();
                     gateway.DropExpiredRoutingCachedEntries();
-                    Thread.Sleep(TIME_BEFORE_CLIENT_DROP);
+                    Thread.Sleep(gateway.MessagingConfiguration.ClientDropTimeout);
                 }
             }
 
@@ -350,12 +355,16 @@ namespace Orleans.Runtime.Messaging
         private class GatewaySender : AsynchQueueAgent<OutgoingClientMessage>
         {
             private readonly Gateway gateway;
+            private readonly MessageFactory messageFactory;
             private readonly CounterStatistic gatewaySends;
-
-            internal GatewaySender(string name, Gateway gateway)
+            private readonly SerializationManager serializationManager;
+            
+            internal GatewaySender(string name, Gateway gateway, MessageFactory messageFactory, SerializationManager serializationManager)
                 : base(name, gateway.MessagingConfiguration)
             {
                 this.gateway = gateway;
+                this.messageFactory = messageFactory;
+                this.serializationManager = serializationManager;
                 gatewaySends = CounterStatistic.FindOrCreate(StatisticNames.GATEWAY_SENT);
                 OnFault = FaultBehavior.RestartOnFault;
             }
@@ -387,7 +396,10 @@ namespace Orleans.Runtime.Messaging
                     if (msg.Direction == Message.Directions.Request)
                     {
                         MessagingStatisticsGroup.OnRejectedMessage(msg);
-                        Message error = msg.CreateRejectionResponse(Message.RejectionTypes.Unrecoverable, "Unknown client " + client);
+                        Message error = this.messageFactory.CreateRejectionResponse(
+                            msg,
+                            Message.RejectionTypes.Unrecoverable,
+                            "Unknown client " + client);
                         gateway.SendMessage(error);
                     }
                     else
@@ -433,87 +445,6 @@ namespace Orleans.Runtime.Messaging
                 }
             }
 
-            protected override void ProcessBatch(List<OutgoingClientMessage> requests)
-            {
-                if (Cts.IsCancellationRequested) return;
-                
-                if (requests == null || requests.Count == 0) return;
-
-                // Every Tuple in requests are guaranteed to have the same client
-                var client = requests[0].Item1;
-                var msgs = requests.Where(r => r != null).Select(r => r.Item2).ToList();
-
-                // Find the client state
-                ClientState clientState;
-                bool found;
-                // TODO: Why do we need this lock here if clients is a ConcurrentDictionary?
-                //lock (gateway.lockable)
-                {
-                    found = gateway.clients.TryGetValue(client, out clientState);
-                }
-
-                // This should never happen -- but make sure to handle it reasonably, just in case
-                if (!found || (clientState == null))
-                {
-                    if (msgs.Count == 0) return;
-
-                    Log.Info(ErrorCode.GatewayTryingToSendToUnrecognizedClient, "Trying to send {0} messages to an unrecognized client {1}. First msg {0}",
-                        msgs.Count, client, msgs[0].ToString());
-
-                    foreach (var msg in msgs)
-                    {
-                        MessagingStatisticsGroup.OnFailedSentMessage(msg);
-                        // Message for unrecognized client -- reject it
-                        if (msg.Direction == Message.Directions.Request)
-                        {
-                            MessagingStatisticsGroup.OnRejectedMessage(msg);
-                            Message error = msg.CreateRejectionResponse(Message.RejectionTypes.Unrecoverable, "Unknown client " + client);
-                            gateway.SendMessage(error);
-                        }
-                        else
-                        {
-                            MessagingStatisticsGroup.OnDroppedSentMessage(msg);
-                        }
-                    }
-                    return;
-                }
-
-                // if disconnected - queue for later.
-                if (!clientState.IsConnected)
-                {
-                    if (msgs.Count == 0) return;
-
-                    if (Log.IsVerbose3) Log.Verbose3("Queued {0} messages for client {1}", msgs.Count, client);
-                    clientState.PendingBatchesToSend.Enqueue(msgs);
-                    return;
-                }
-
-                // if the queue is non empty - drain it first.
-                if (clientState.PendingBatchesToSend.Count > 0)
-                {
-                    if (msgs.Count != 0)
-                        clientState.PendingBatchesToSend.Enqueue(msgs);
-                    
-                    // For now, drain in-line, although in the future this should happen in yet another asynch agent
-                    DrainBatch(clientState);
-                    return;
-                }
-                // the queue was empty AND we are connected.
-
-                // If the request includes a message to send, send it (or enqueue it for later)
-                if (msgs.Count == 0) return;
-
-                if (!SendBatch(msgs, clientState.Socket))
-                {
-                    if (Log.IsVerbose3) Log.Verbose3("Queued {0} messages for client {1}", msgs.Count, client);
-                    clientState.PendingBatchesToSend.Enqueue(msgs);
-                }
-                else
-                {
-                    if (Log.IsVerbose3) Log.Verbose3("Sent {0} message to client {1}", msgs.Count, client);
-                }
-            }
-
             private void Drain(ClientState clientState)
             {
                 // For now, drain in-line, although in the future this should happen in yet another asynch agent
@@ -532,25 +463,6 @@ namespace Orleans.Runtime.Messaging
                 }
             }
 
-            private void DrainBatch(ClientState clientState)
-            {
-                // For now, drain in-line, although in the future this should happen in yet another asynch agent
-                while (clientState.PendingBatchesToSend.Count > 0)
-                {
-                    var m = clientState.PendingBatchesToSend.Peek();
-                    if (SendBatch(m, clientState.Socket))
-                    {
-                        if (Log.IsVerbose3) Log.Verbose3("Sent {0} queued messages to client {1}", m.Count, clientState.Id);
-                        clientState.PendingBatchesToSend.Dequeue();
-                    }
-                    else
-                    {
-                        return;
-                    }
-                }
-            }
-
-
             private bool Send(Message msg, Socket sock)
             {
                 if (Cts.IsCancellationRequested) return false;
@@ -562,11 +474,18 @@ namespace Orleans.Runtime.Messaging
                 int headerLength;
                 try
                 {
-                    data = msg.Serialize(out headerLength);
+                    int bodyLength;
+                    data = msg.Serialize(this.serializationManager, out headerLength, out bodyLength);
+                    if (headerLength + bodyLength > this.serializationManager.LargeObjectSizeThreshold)
+                    {
+                        logger.Info(ErrorCode.Messaging_LargeMsg_Outgoing, "Preparing to send large message Size={0} HeaderLength={1} BodyLength={2} #ArraySegments={3}. Msg={4}",
+                            headerLength + bodyLength + Message.LENGTH_HEADER_SIZE, headerLength, bodyLength, data.Count, this.ToString());
+                        if (logger.IsVerbose3) logger.Verbose3("Sending large message {0}", msg.ToLongString());
+                    }
                 }
                 catch (Exception exc)
                 {
-                    OnMessageSerializationFailure(msg, exc);
+                    this.OnMessageSerializationFailure(msg, exc);
                     return true;
                 }
 
@@ -611,62 +530,6 @@ namespace Orleans.Runtime.Messaging
                 }
                 gatewaySends.Increment();
                 msg.ReleaseBodyAndHeaderBuffers();
-                return !sendError;
-            }
-
-            private bool SendBatch(List<Message> msgs, Socket sock)
-            {
-                if (Cts.IsCancellationRequested) return false;
-                if (sock == null) return false;
-                if (msgs == null || msgs.Count == 0) return true;
-                
-                // Send the message
-                List<ArraySegment<byte>> data;
-                int headerLengths;
-                bool continueSend = OutgoingMessageSender.SerializeMessages(msgs, out data, out headerLengths, OnMessageSerializationFailure);
-                if (!continueSend) return false;
-
-                int length = data.Sum(x => x.Count);
-
-                int bytesSent = 0;
-                bool exceptionSending = false;
-                bool countMismatchSending = false;
-                string sendErrorStr;
-
-                try
-                {
-                    bytesSent = sock.Send(data);
-                    if (bytesSent != length)
-                    {
-                        // The complete message wasn't sent, even though no error was reported; treat this as an error
-                        countMismatchSending = true;
-                        sendErrorStr = String.Format("Byte count mismatch on send: sent {0}, expected {1}", bytesSent, length);
-                        Log.Warn(ErrorCode.GatewayByteCountMismatch, sendErrorStr);
-                    }
-                }
-                catch (Exception exc)
-                {
-                    exceptionSending = true;
-                    string remoteEndpoint = "";
-                    if (!(exc is ObjectDisposedException))
-                    {
-                        remoteEndpoint = sock.RemoteEndPoint.ToString();
-                    }
-                    sendErrorStr = String.Format("Exception sending to client at {0}: {1}", remoteEndpoint, exc);
-                    Log.Warn(ErrorCode.GatewayExceptionSendingToClient, sendErrorStr, exc);
-                }
-
-                MessagingStatisticsGroup.OnMessageBatchSend(msgs[0].TargetSilo, msgs[0].Direction, bytesSent, headerLengths, SocketDirection.GatewayToClient, msgs.Count);
-                bool sendError = exceptionSending || countMismatchSending;
-                if (sendError)
-                {
-                    gateway.RecordClosedSocket(sock);
-                    SocketManager.CloseSocket(sock);
-                }
-                gatewaySends.Increment();
-                foreach (Message msg in msgs)
-                    msg.ReleaseBodyAndHeaderBuffers();
-                
                 return !sendError;
             }
 

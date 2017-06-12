@@ -1,36 +1,37 @@
 using System;
 using System.Threading.Tasks;
-
 using Orleans.Concurrency;
+using Orleans.MultiCluster;
 using Orleans.Runtime.Configuration;
 
 
 namespace Orleans.Runtime.ReminderService
 {
     [Reentrant]
+    [OneInstancePerCluster]
     internal class GrainBasedReminderTable : Grain, IReminderTableGrain
     {
         private InMemoryRemindersTable remTable;
-        private TraceLogger logger;
+        private Logger logger;
 
         public override Task OnActivateAsync()
         {
-            logger = TraceLogger.GetLogger(String.Format("GrainBasedReminderTable_{0}", Data.Address.ToString()), TraceLogger.LoggerType.Runtime);
+            logger = LogManager.GetLogger(String.Format("GrainBasedReminderTable_{0}", Data.Address.ToString()), LoggerType.Runtime);
             logger.Info("GrainBasedReminderTable {0} Activated. Full identity: {1}", Identity, Data.Address.ToFullString());
             remTable = new InMemoryRemindersTable();
             base.DelayDeactivation(TimeSpan.FromDays(10 * 365)); // Delay Deactivation for GrainBasedReminderTable virtually indefinitely.
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
-        public Task Init(GlobalConfiguration config, TraceLogger logger)
+        public Task Init(GlobalConfiguration config, Logger logger)
         {
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         public override Task OnDeactivateAsync()
         {
             logger.Info("GrainBasedReminderTable {0} OnDeactivateAsync. Full identity: {1}", Identity, Data.Address.ToFullString());
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         public Task<ReminderTableData> ReadRows(GrainReference grainRef)
@@ -78,7 +79,7 @@ namespace Orleans.Runtime.ReminderService
         {
             logger.Info("TestOnlyClearTable");
             remTable.Reset();
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
     }
 }

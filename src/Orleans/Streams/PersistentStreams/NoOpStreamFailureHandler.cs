@@ -6,7 +6,7 @@ namespace Orleans.Streams
     public class NoOpStreamDeliveryFailureHandler : IStreamFailureHandler
     {
         public NoOpStreamDeliveryFailureHandler()
-            : this(true)
+            : this(false)
         {
         }
 
@@ -15,7 +15,7 @@ namespace Orleans.Streams
             ShouldFaultSubsriptionOnError = faultOnError;
         }
 
-        public bool ShouldFaultSubsriptionOnError { get; private set; }
+        public bool ShouldFaultSubsriptionOnError { get; }
 
         /// <summary>
         /// Should be called when an event could not be delivered to a consumer, after exhausting retry attempts.
@@ -23,13 +23,13 @@ namespace Orleans.Streams
         public Task OnDeliveryFailure(GuidId subscriptionId, string streamProviderName, IStreamIdentity streamIdentity,
             StreamSequenceToken sequenceToken)
         {
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         public Task OnSubscriptionFailure(GuidId subscriptionId, string streamProviderName, IStreamIdentity streamIdentity,
             StreamSequenceToken sequenceToken)
         {
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
     }
 }

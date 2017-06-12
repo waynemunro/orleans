@@ -1,17 +1,16 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Threading.Tasks;
 using Orleans.Runtime;
+using Orleans.Storage.Internal;
 
 namespace Orleans.Storage
 {
 
     /// <summary>
-    /// Implementaiton class for the Storage Grain used by In-memory Storage Provider
+    /// Implementaiton class for the Storage Grain used by In-memory storage provider
+    /// <c>Orleans.Storage.MemoryStorage</c>
     /// </summary>
-    /// <seealso cref="MemoryStorage"/>
-    /// <seealso cref="IMemoryStorageGrain"/>
     internal class MemoryStorageGrain : Grain, IMemoryStorageGrain
     {
         private IDictionary<string, GrainStateStore> grainStore;
@@ -23,21 +22,21 @@ namespace Orleans.Storage
             base.DelayDeactivation(TimeSpan.FromDays(10 * 365)); // Delay Deactivation for MemoryStorageGrain virtually indefinitely.
             logger = GetLogger(GetType().Name);
             logger.Info("OnActivateAsync");
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         public override Task OnDeactivateAsync()
         {
             logger.Info("OnDeactivateAsync");
             grainStore = null;
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         public Task<IGrainState> ReadStateAsync(string stateStore, string grainStoreKey)
         {
             if (logger.IsVerbose) logger.Verbose("ReadStateAsync for {0} grain: {1}", stateStore, grainStoreKey);
             GrainStateStore storage = GetStoreForGrain(stateStore);
-            var grainState = storage.GetGrainState(grainStoreKey);;
+            var grainState = storage.GetGrainState(grainStoreKey);
             return Task.FromResult(grainState);
         }
         
@@ -54,7 +53,7 @@ namespace Orleans.Storage
         {
             GrainStateStore storage = GetStoreForGrain(grainType);
             storage.DeleteGrainState(grainId, etag);
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         private GrainStateStore GetStoreForGrain(string grainType)
@@ -71,7 +70,7 @@ namespace Orleans.Storage
 
         private class GrainStateStore
         {
-            private Logger logger;
+            private readonly Logger logger;
             public GrainStateStore(Logger logger)
             {
                 this.logger = logger;
@@ -82,7 +81,7 @@ namespace Orleans.Storage
             {
                 IGrainState entry;
                 grainStateStorage.TryGetValue(grainId, out entry);
-                return entry;
+                return ReferenceEquals(entry, Deleted) ? null : entry;
             }
 
             public void UpdateGrainState(string grainId, IGrainState grainState)
@@ -103,42 +102,56 @@ namespace Orleans.Storage
             {
                 IGrainState entry;
                 string currentETag = null;
-                grainStateStorage.TryGetValue(grainId, out entry);
                 if (grainStateStorage.TryGetValue(grainId, out entry))
                 {
                     currentETag = entry.ETag;
                 }
 
                 ValidateEtag(currentETag, receivedEtag, grainId, "Delete");
-                grainStateStorage.Remove(grainId);
+                grainStateStorage[grainId] = Deleted;
             }
 
             private static string NewEtag()
             {
-                return Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
+                return Guid.NewGuid().ToString("N");
             }
 
             private void ValidateEtag(string currentETag, string receivedEtag, string grainStoreKey, string operation)
             {
-                if (receivedEtag == null) // first write
+                // if we have no current etag, we will accept the users data.
+                // This is a mitigation for when the memory storage grain is lost due to silo crash.
+                if (currentETag == null)
+                    return;
+
+                // if this is our first write, and we have an empty etag, we're good
+                if (string.IsNullOrEmpty(currentETag) && receivedEtag == null)
+                    return;
+
+                // if current state and new state have matching etags, we're good
+                if (receivedEtag == currentETag)
+                    return;
+
+                // else we have an etag mismatch
+                if (logger.IsWarning)
                 {
-                    if (currentETag != null)
-                    {
-                        string error = string.Format("Etag mismatch during {0} for grain {1}: Expected = {2} Received = null", operation, grainStoreKey, currentETag.ToString());
-                        logger.Warn(0, error);
-                        new InconsistentStateException(error);
-                    }
+                    logger.Warn(0, $"Etag mismatch during {operation} for grain {grainStoreKey}: Expected = {currentETag ?? "null"} Received = {receivedEtag}");
                 }
-                else // non first write
-                {
-                    if (receivedEtag != currentETag.ToString())
-                    {
-                        string error = string.Format("Etag mismatch during {0} for grain {1}: Expected = {2} Received = {3}", operation, grainStoreKey, currentETag.ToString(), receivedEtag);
-                        logger.Warn(0, error);
-                        throw new InconsistentStateException(error);
-                    }
-                }
+                throw new MemoryStorageEtagMismatchException(currentETag, receivedEtag);
             }
+
+            /// <summary>
+            /// Marker to record deleted state so we can detect the difference between deleted state and state that never existed.
+            /// </summary>
+            private class DeletedState : IGrainState
+            {
+                public DeletedState()
+                {
+                    ETag = string.Empty;
+                }
+                public object State { get; set; }
+                public string ETag { get; set; }
+            }
+            private static readonly IGrainState Deleted = new DeletedState();
         }
     }
 }

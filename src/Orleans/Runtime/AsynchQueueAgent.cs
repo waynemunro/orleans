@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Linq;
 using Orleans.Runtime.Configuration;
 
 namespace Orleans.Runtime
@@ -25,17 +24,22 @@ namespace Orleans.Runtime
 
         public void QueueRequest(T request)
         {
+            if (requestQueue==null)
+            {
+                return;
+            }
+
 #if TRACK_DETAILED_STATS
             if (StatisticsCollector.CollectQueueStats)
             {
                 queueTracking.OnEnQueueRequest(1, requestQueue.Count, request);
             }
 #endif
+
             requestQueue.Add(request);
         }
 
         protected abstract void Process(T request);
-        protected abstract void ProcessBatch(List<T> requests);
 
         protected override void Run()
         {
@@ -48,14 +52,7 @@ namespace Orleans.Runtime
 #endif
             try
             {
-                if (config.UseMessageBatching)
-                {
-                    RunBatching();
-                }
-                else
-                {
-                    RunNonBatching();
-                }
+                RunNonBatching();
             }
             finally
             {
@@ -74,7 +71,7 @@ namespace Orleans.Runtime
         {            
             while (true)
             {
-                if (Cts.IsCancellationRequested)
+                if (Cts == null || Cts.IsCancellationRequested)
                 {
                     return;
                 }
@@ -109,60 +106,6 @@ namespace Orleans.Runtime
             }
         }
 
-        protected void RunBatching()
-        {
-            int maxBatchingSize = config.MaxMessageBatchingSize;
-
-            while (true)
-            {
-                if (Cts.IsCancellationRequested)
-                {
-                    return;
-                }
-
-                var mlist = new List<T>();
-                try
-                {
-                    T firstRequest = requestQueue.Take();
-                    mlist.Add(firstRequest);
-
-                    while (requestQueue.Count != 0 && mlist.Count < maxBatchingSize &&
-                        requestQueue.First().IsSameDestination(firstRequest))
-                    {
-                        mlist.Add(requestQueue.Take());
-                    }
-                }
-                catch (InvalidOperationException)
-                {
-                    Log.Info(ErrorCode.Runtime_Error_100312, "Stop request processed");
-                    break;
-                }
-
-#if TRACK_DETAILED_STATS
-                if (StatisticsCollector.CollectQueueStats)
-                {
-                    foreach (var request in mlist)
-                    {
-                        queueTracking.OnDeQueueRequest(request);
-                    }
-                }
-
-                if (StatisticsCollector.CollectThreadTimeTrackingStats)
-                {
-                    threadTracking.OnStartProcessing();
-                }
-#endif
-                ProcessBatch(mlist);
-#if TRACK_DETAILED_STATS
-                if (StatisticsCollector.CollectThreadTimeTrackingStats)
-                {
-                    threadTracking.OnStopProcessing();
-                    threadTracking.IncrementNumberOfProcessed(mlist.Count);
-                }
-#endif
-            }
-        }
-
         public override void Stop()
         {
 #if TRACK_DETAILED_STATS
@@ -171,8 +114,17 @@ namespace Orleans.Runtime
                 threadTracking.OnStopExecution();
             }
 #endif
-            requestQueue.CompleteAdding();
+            requestQueue?.CompleteAdding();
             base.Stop();
+        }
+
+        protected void DrainQueue(Action<T> action)
+        {
+            T request;
+            while (requestQueue.TryTake(out request))
+            {
+                action(request);
+            }
         }
 
         public virtual int Count
@@ -197,11 +149,8 @@ namespace Orleans.Runtime
 #endif
             base.Dispose(disposing);
 
-            if (requestQueue != null)
-            {
-                requestQueue.Dispose();
-                requestQueue = null;
-            }
+            requestQueue?.Dispose();
+            requestQueue = null;
         }
 
         #endregion

@@ -33,14 +33,9 @@ namespace Orleans.Runtime.Configuration
         IList<Tuple<string, Severity>> TraceLevelOverrides { get; }
         /// <summary>
         /// The TraceToConsole attribute specifies whether trace output should be written to the console.
-        /// The default is not to write trace data to the console.
+        /// The default is write trace data to the console if available.
         /// </summary>
         bool TraceToConsole { get; set; }
-        /// <summary>
-        /// The WriteMessagingTraces attribute specifies whether to write details message traces.
-        /// This should be used only in development mode and never in production.
-        /// </summary>
-        bool WriteMessagingTraces { get; set; }
         /// <summary>
         /// The LargeMessageWarningThreshold attribute specifies when to generate a warning trace message for large messages.
         /// </summary>

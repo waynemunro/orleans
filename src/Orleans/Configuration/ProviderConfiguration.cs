@@ -23,6 +23,12 @@ namespace Orleans.Runtime.Configuration
 
         public string Type { get; private set; }
         public string Name { get; private set; }
+        public IProviderManager ProviderManager {get { return providerManager; } }
+
+        public void AddChildConfiguration(IProviderConfiguration config)
+        {
+            childConfigurations.Add(config as ProviderConfiguration);
+        }
 
         private ReadOnlyDictionary<string, string> readonlyCopyOfProperties;
         /// <summary>
@@ -47,7 +53,7 @@ namespace Orleans.Runtime.Configuration
 
         public ProviderConfiguration(IDictionary<string, string> properties, string providerType, string name)
         {
-            this.properties = properties;
+            this.properties = properties ?? new Dictionary<string, string>(1);
             Type = providerType;
             Name = name;
         }
@@ -55,7 +61,7 @@ namespace Orleans.Runtime.Configuration
         // for testing purposes
         internal ProviderConfiguration(IDictionary<string, string> properties, IList<IProvider> childProviders)
         {
-            this.properties = properties;
+            this.properties = properties ?? new Dictionary<string, string>(1);
             this.childProviders = childProviders;
         }
 
@@ -195,6 +201,8 @@ namespace Orleans.Runtime.Configuration
         public const string BOOTSTRAP_PROVIDER_CATEGORY_NAME = "Bootstrap";
         public const string STORAGE_PROVIDER_CATEGORY_NAME = "Storage";
         public const string STREAM_PROVIDER_CATEGORY_NAME = "Stream";
+        public const string LOG_CONSISTENCY_PROVIDER_CATEGORY_NAME = "LogConsistency";
+        public const string STATISTICS_PROVIDER_CATEGORY_NAME = "Statistics";
 
         public string Name { get; set; }
         public IDictionary<string, IProviderConfiguration> Providers { get; set; }

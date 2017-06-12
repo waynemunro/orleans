@@ -1,13 +1,16 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-
-using Orleans.Runtime.Configuration;
-using Orleans.Storage;
 using Orleans.CodeGeneration;
+using Orleans.Core;
+using Orleans.GrainDirectory;
+using Orleans.Runtime.Configuration;
+using Orleans.Runtime.Scheduler;
+using Orleans.Storage;
 
 namespace Orleans.Runtime
 {
@@ -16,14 +19,14 @@ namespace Orleans.Runtime
     /// MUST lock this object for any concurrent access
     /// Consider: compartmentalize by usage, e.g., using separate interfaces for data for catalog, etc.
     /// </summary>
-    internal class ActivationData : IActivationData, IInvokable
+    internal class ActivationData : IGrainActivationContext, IActivationData, IInvokable
     {
         // This class is used for activations that have extension invokers. It keeps a dictionary of 
         // invoker objects to use with the activation, and extend the default invoker
         // defined for the grain class.
         // Note that in all cases we never have more than one copy of an actual invoker;
         // we may have a ExtensionInvoker per activation, in the worst case.
-        private class ExtensionInvoker : IGrainMethodInvoker
+        private class ExtensionInvoker : IGrainMethodInvoker, IGrainExtensionMap
         {
             // Because calls to ExtensionInvoker are allways made within the activation context,
             // we rely on the single-threading guarantee of the runtime and do not protect the map with a lock.
@@ -99,19 +102,17 @@ namespace Orleans.Runtime
             /// The base invoker will throw an appropriate exception if the request is not recognized.
             /// </summary>
             /// <param name="grain"></param>
-            /// <param name="interfaceId"></param>
-            /// <param name="methodId"></param>
-            /// <param name="arguments"></param>
+            /// <param name="request"></param>
             /// <returns></returns>
-            public Task<object> Invoke(IAddressable grain, int interfaceId, int methodId, object[] arguments)
+            public Task<object> Invoke(IAddressable grain, InvokeMethodRequest request)
             {
-                if (extensionMap == null || !extensionMap.ContainsKey(interfaceId))
+                if (extensionMap == null || !extensionMap.ContainsKey(request.InterfaceId))
                     throw new InvalidOperationException(
-                        String.Format("Extension invoker invoked with an unknown inteface ID:{0}.", interfaceId));
+                        String.Format("Extension invoker invoked with an unknown inteface ID:{0}.", request.InterfaceId));
 
-                var invoker = extensionMap[interfaceId].Item2;
-                var extension = extensionMap[interfaceId].Item1;
-                return invoker.Invoke(extension, interfaceId, methodId, arguments);
+                var invoker = extensionMap[request.InterfaceId].Item2;
+                var extension = extensionMap[request.InterfaceId].Item1;
+                return invoker.Invoke(extension, request);
             }
 
             public bool IsExtensionInstalled(int interfaceId)
@@ -123,63 +124,108 @@ namespace Orleans.Runtime
             {
                 get { return 0; } // 0 indicates an extension invoker that may have multiple intefaces inplemented by extensions.
             }
+
+            public ushort InterfaceVersion
+            {
+                get { return 0; }
+            }
+
+            /// <summary>
+            /// Gets the extension from this instance if it is available.
+            /// </summary>
+            /// <param name="interfaceId">The interface id.</param>
+            /// <param name="extension">The extension.</param>
+            /// <returns>
+            /// <see langword="true"/> if the extension is found, <see langword="false"/> otherwise.
+            /// </returns>
+            public bool TryGetExtension(int interfaceId, out IGrainExtension extension)
+            {
+                Tuple<IGrainExtension, IGrainExtensionMethodInvoker> value;
+                if (extensionMap != null && extensionMap.TryGetValue(interfaceId, out value))
+                {
+                    extension = value.Item1;
+                }
+                else
+                {
+                    extension = null;
+                }
+
+                return extension != null;
+            }
         }
 
         // This is the maximum amount of time we expect a request to continue processing
-        private static TimeSpan maxRequestProcessingTime;
-        private static NodeConfiguration nodeConfiguration;
+        private readonly TimeSpan maxRequestProcessingTime;
+        private readonly TimeSpan maxWarningRequestProcessingTime;
+        private readonly NodeConfiguration nodeConfiguration;
         public readonly TimeSpan CollectionAgeLimit;
+        private readonly Logger logger;
         private IGrainMethodInvoker lastInvoker;
 
         // This is the maximum number of enqueued request messages for a single activation before we write a warning log or reject new requests.
         private LimitValue maxEnqueuedRequestsLimit;
-        private HashSet<GrainTimer> timers;
-        private readonly TraceLogger logger;
-
-        public static void Init(ClusterConfiguration config, NodeConfiguration nodeConfig)
-        {
-            // Consider adding a config parameter for this
-            maxRequestProcessingTime = config.Globals.ResponseTimeout.Multiply(5);
-            nodeConfiguration = nodeConfig;
-        }
-
-        public ActivationData(ActivationAddress addr, string genericArguments, PlacementStrategy placedUsing, IActivationCollector collector, TimeSpan ageLimit)
+        private HashSet<IGrainTimer> timers;
+        
+        public ActivationData(
+            ActivationAddress addr,
+            string genericArguments,
+            PlacementStrategy placedUsing,
+            MultiClusterRegistrationStrategy registrationStrategy,
+            IActivationCollector collector,
+            TimeSpan ageLimit,
+            NodeConfiguration nodeConfiguration,
+            TimeSpan maxWarningRequestProcessingTime,
+			TimeSpan maxRequestProcessingTime,
+            IRuntimeClient runtimeClient)
         {
             if (null == addr) throw new ArgumentNullException("addr");
             if (null == placedUsing) throw new ArgumentNullException("placedUsing");
             if (null == collector) throw new ArgumentNullException("collector");
 
-            logger = TraceLogger.GetLogger("ActivationData", TraceLogger.LoggerType.Runtime);
+            logger = LogManager.GetLogger("ActivationData", LoggerType.Runtime);
+            this.maxRequestProcessingTime = maxRequestProcessingTime;
+            this.maxWarningRequestProcessingTime = maxWarningRequestProcessingTime;
+            this.nodeConfiguration = nodeConfiguration;
             ResetKeepAliveRequest();
             Address = addr;
             State = ActivationState.Create;
             PlacedUsing = placedUsing;
-
+            RegistrationStrategy = registrationStrategy;
             if (!Grain.IsSystemTarget && !Constants.IsSystemGrain(Grain))
             {
                 this.collector = collector;
             }
             CollectionAgeLimit = ageLimit;
 
-            GrainReference = GrainReference.FromGrainId(addr.Grain, genericArguments,
-                Grain.IsSystemTarget ? addr.Silo : null);
+            GrainReference = GrainReference.FromGrainId(addr.Grain, runtimeClient, genericArguments, Grain.IsSystemTarget ? addr.Silo : null);
+            this.SchedulingContext = new SchedulingContext(this);
         }
+
+        public Type GrainType => GrainTypeData.Type;
+
+        public IGrainIdentity GrainIdentity => this.Identity;
+
+        public IServiceProvider ActivationServices { get; private set; }
 
         #region Method invocation
 
         private ExtensionInvoker extensionInvoker;
-        public IGrainMethodInvoker GetInvoker(int interfaceId, string genericGrainType=null)
+        public IGrainMethodInvoker GetInvoker(GrainTypeManager typeManager, int interfaceId, string genericGrainType = null)
         {
             // Return previous cached invoker, if applicable
             if (lastInvoker != null && interfaceId == lastInvoker.InterfaceId) // extension invoker returns InterfaceId==0, so this condition will never be true if an extension is installed
                 return lastInvoker;
 
-            if (extensionInvoker != null && extensionInvoker.IsExtensionInstalled(interfaceId)) // HasExtensionInstalled(interfaceId)
+            if (extensionInvoker != null && extensionInvoker.IsExtensionInstalled(interfaceId))
+            {
                 // Shared invoker for all extensions installed on this grain
                 lastInvoker = extensionInvoker;
+            }
             else
+            {
                 // Find the specific invoker for this interface / grain type
-                lastInvoker = RuntimeClient.Current.GetInvoker(interfaceId, genericGrainType);
+                lastInvoker = typeManager.GetInvoker(interfaceId, genericGrainType);
+            }
 
             return lastInvoker;
         }
@@ -211,6 +257,8 @@ namespace Orleans.Runtime
 
         #endregion
 
+        public ISchedulingContext SchedulingContext { get; }
+
         public string GrainTypeName
         {
             get
@@ -223,17 +271,23 @@ namespace Orleans.Runtime
             }
         }
 
-        internal Type GrainInstanceType { get; private set; }
+        internal Type GrainInstanceType => GrainTypeData?.Type;
 
         internal void SetGrainInstance(Grain grainInstance)
         {
             GrainInstance = grainInstance;
-            if (grainInstance != null)
+        }
+
+        internal void SetupContext(GrainTypeData typeData, IServiceProvider grainServices)
+        {
+            this.GrainTypeData = typeData;
+            this.ActivationServices = grainServices;
+            if (typeData != null)
             {
-                GrainInstanceType = grainInstance.GetType();
+                var grainType = typeData.Type;
 
                 // Don't ever collect system grains or reminder table grain or memory store grains.
-                bool doNotCollect = typeof(IReminderTableGrain).IsAssignableFrom(GrainInstanceType) || typeof(IMemoryStorageGrain).IsAssignableFrom(GrainInstanceType);
+                bool doNotCollect = typeof(IReminderTableGrain).IsAssignableFrom(grainType) || typeof(IMemoryStorageGrain).IsAssignableFrom(grainType);
                 if (doNotCollect)
                 {
                     this.collector = null;
@@ -279,18 +333,17 @@ namespace Orleans.Runtime
             get { return Grain; }
         }
 
+        public GrainTypeData GrainTypeData { get; private set; }
+
         public Grain GrainInstance { get; private set; }
 
         public ActivationId ActivationId { get { return Address.Activation; } }
 
         public ActivationAddress Address { get; private set; }
 
-        public IDisposable RegisterTimer(Func<object, Task> asyncCallback, object state, TimeSpan dueTime, TimeSpan period)
+        public void OnTimerCreated(IGrainTimer timer)
         {
-            var timer = GrainTimer.FromTaskCallback(asyncCallback, state, dueTime, period);
             AddTimer(timer);
-            timer.Start();
-            return timer;
         }
 
         #endregion
@@ -314,6 +367,7 @@ namespace Orleans.Runtime
         public void PrepareForDeactivation()
         {
             SetState(ActivationState.Deactivating);
+            deactivationStartTime = DateTime.UtcNow;
             StopAllTimers();
         }
 
@@ -372,9 +426,13 @@ namespace Orleans.Runtime
 
         public PlacementStrategy PlacedUsing { get; private set; }
 
-        // currently, the only supported multi-activation grain is one using the StatelessWorkerPlacement strategy.
+        public MultiClusterRegistrationStrategy RegistrationStrategy { get; private set; }
+
+        // Currently, the only supported multi-activation grain is one using the StatelessWorkerPlacement strategy.
         internal bool IsStatelessWorker { get { return PlacedUsing is StatelessWorkerPlacement; } }
 
+        // Currently, the only grain type that is not registered in the Grain Directory is StatelessWorker. 
+        internal bool IsUsingGrainDirectory { get { return !IsStatelessWorker; } }
 
         public Message Running { get; private set; }
 
@@ -384,6 +442,7 @@ namespace Orleans.Runtime
 
         private DateTime currentRequestStartTime;
         private DateTime becameIdle;
+        private DateTime deactivationStartTime;
 
         public void RecordRunning(Message message)
         {
@@ -457,11 +516,18 @@ namespace Orleans.Runtime
             }
         }
 
+        public enum EnqueueMessageResult
+        {
+            Success,
+            ErrorInvalidActivation,
+            ErrorStuckActivation,
+        }
+
         /// <summary>
         /// Insert in a FIFO order
         /// </summary>
         /// <param name="message"></param>
-        public bool EnqueueMessage(Message message)
+        public EnqueueMessageResult EnqueueMessage(Message message)
         {
             lock (this)
             {
@@ -469,14 +535,29 @@ namespace Orleans.Runtime
                 {
                     logger.Warn(ErrorCode.Dispatcher_InvalidActivation,
                         "Cannot enqueue message to invalid activation {0} : {1}", this.ToDetailedString(), message);
-                    return false;
+                    return EnqueueMessageResult.ErrorInvalidActivation;
                 }
-                // If maxRequestProcessingTime is never set, then we will skip this check
-                if (maxRequestProcessingTime.TotalMilliseconds > 0 && Running != null)
+                if (State == ActivationState.Deactivating)
                 {
-                    // Consider: Handle long request detection for reentrant activations -- this logic only works for non-reentrant activations
+                    var deactivatingTime = DateTime.UtcNow - deactivationStartTime;
+                    if (deactivatingTime > maxRequestProcessingTime)
+                    {
+                        logger.Error(ErrorCode.Dispatcher_StuckActivation,
+                            $"Current activation {ToDetailedString()} marked as Deactivating for {deactivatingTime}. Trying  to enqueue {message}.");
+                        return EnqueueMessageResult.ErrorStuckActivation;
+                    }
+                }
+                if (Running != null)
+                {
                     var currentRequestActiveTime = DateTime.UtcNow - currentRequestStartTime;
                     if (currentRequestActiveTime > maxRequestProcessingTime)
+                    {
+                        logger.Error(ErrorCode.Dispatcher_StuckActivation,
+                            $"Current request has been active for {currentRequestActiveTime} for activation {ToDetailedString()}. Currently executing {Running}.  Trying  to enqueue {message}.");
+                        return EnqueueMessageResult.ErrorStuckActivation;
+                    }
+                    // Consider: Handle long request detection for reentrant activations -- this logic only works for non-reentrant activations
+                    else if (currentRequestActiveTime > maxWarningRequestProcessingTime)
                     {
                         logger.Warn(ErrorCode.Dispatcher_ExtendedMessageProcessing,
                              "Current request has been active for {0} for activation {1}. Currently executing {2}. Trying  to enqueue {3}.",
@@ -486,17 +567,17 @@ namespace Orleans.Runtime
 
                 waiting = waiting ?? new List<Message>();
                 waiting.Add(message);
-                return true;
+                return EnqueueMessageResult.Success;
             }
         }
- 
+
         /// <summary>
         /// Check whether this activation is overloaded. 
         /// Returns LimitExceededException if overloaded, otherwise <c>null</c>c>
         /// </summary>
-        /// <param name="log">TraceLogger to use for reporting any overflow condition</param>
+        /// <param name="log">Logger to use for reporting any overflow condition</param>
         /// <returns>Returns LimitExceededException if overloaded, otherwise <c>null</c>c></returns>
-        public LimitExceededException CheckOverloaded(TraceLogger log)
+        public LimitExceededException CheckOverloaded(Logger log)
         {
             LimitValue limitValue = GetMaxEnqueuedRequestLimit();
 
@@ -542,7 +623,7 @@ namespace Orleans.Runtime
             if (maxEnqueuedRequestsLimit != null) return maxEnqueuedRequestsLimit;
             if (GrainInstanceType != null)
             {
-                string limitName = CodeGeneration.GrainInterfaceData.IsStatelessWorker(GrainInstanceType)
+                string limitName = CodeGeneration.GrainInterfaceUtils.IsStatelessWorker(GrainInstanceType.GetTypeInfo())
                     ? LimitNames.LIMIT_MAX_ENQUEUED_REQUESTS_STATELESS_WORKER
                     : LimitNames.LIMIT_MAX_ENQUEUED_REQUESTS;
                 maxEnqueuedRequestsLimit = nodeConfiguration.LimitManager.GetLimit(limitName); // Cache for next time
@@ -673,13 +754,13 @@ namespace Orleans.Runtime
         #endregion
 
         #region In-grain Timers
-        internal void AddTimer(GrainTimer timer)
+        internal void AddTimer(IGrainTimer timer)
         {
             lock(this)
             {
                 if (timers == null)
                 {
-                    timers = new HashSet<GrainTimer>();
+                    timers = new HashSet<IGrainTimer>();
                 }
                 timers.Add(timer);
             }
@@ -698,7 +779,7 @@ namespace Orleans.Runtime
             }
         }
 
-        internal void OnTimerDisposed(GrainTimer orleansTimerInsideGrain)
+        public void OnTimerDisposed(IGrainTimer orleansTimerInsideGrain)
         {
             lock (this) // need to lock since dispose can be called on finalizer thread, outside garin context (not single threaded).
             {
@@ -712,7 +793,7 @@ namespace Orleans.Runtime
             { 
                 if (timers == null)
                 {
-                    return TaskDone.Done;
+                    return Task.CompletedTask;
                 }
                 var tasks = new List<Task>();
                 var timerCopy = timers.ToList(); // need to copy since OnTimerDisposed will change the timers set.

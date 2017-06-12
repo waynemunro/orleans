@@ -2,7 +2,6 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading.Tasks;
-
 using Orleans.Concurrency;
 using Orleans.Runtime;
 using Orleans.Streams;
@@ -21,13 +20,17 @@ namespace Orleans.Providers.Streams.SimpleMessageStream
     {
         private readonly Dictionary<StreamId, StreamConsumerExtensionCollection> remoteConsumers;
         private readonly IStreamProviderRuntime     providerRuntime;
+        private readonly IStreamPubSub              streamPubSub;
         private readonly bool                       fireAndForgetDelivery;
+        private readonly bool                       optimizeForImmutableData;
         private readonly Logger                     logger;
 
-        internal SimpleMessageStreamProducerExtension(IStreamProviderRuntime providerRt, bool fireAndForget)
+        internal SimpleMessageStreamProducerExtension(IStreamProviderRuntime providerRt, IStreamPubSub pubsub, bool fireAndForget, bool optimizeForImmutable)
         {
             providerRuntime = providerRt;
+            streamPubSub = pubsub;
             fireAndForgetDelivery = fireAndForget;
+            optimizeForImmutableData = optimizeForImmutable;
             remoteConsumers = new Dictionary<StreamId, StreamConsumerExtensionCollection>();
             logger = providerRuntime.GetLogger(GetType().Name);
         }
@@ -39,7 +42,7 @@ namespace Orleans.Providers.Streams.SimpleMessageStream
             // so this call is only made once, when StreamProducer is created.
             if (remoteConsumers.TryGetValue(streamId, out obs)) return;
 
-            obs = new StreamConsumerExtensionCollection();
+            obs = new StreamConsumerExtensionCollection(streamPubSub, logger);
             remoteConsumers.Add(streamId, obs);
         }
 
@@ -76,14 +79,14 @@ namespace Orleans.Providers.Streams.SimpleMessageStream
                 // and the caller immediately does await on the Task 
                 // returned from this method, so we can just direct return here 
                 // without incurring overhead of additional await.
-                return consumers.DeliverItem(streamId, item, fireAndForgetDelivery);
+                return consumers.DeliverItem(streamId, item, fireAndForgetDelivery, optimizeForImmutableData);
             }
             else
             {
                 // We got an item when we don't think we're the subscriber. This is a normal race condition.
                 // We can drop the item on the floor, or pass it to the rendezvous, or log a warning.
             }
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         internal Task CompleteStream(StreamId streamId)
@@ -98,7 +101,7 @@ namespace Orleans.Providers.Streams.SimpleMessageStream
                 // We got an item when we don't think we're the subscriber. This is a normal race condition.
                 // We can drop the item on the floor, or pass it to the rendezvous, or log a warning.
             }
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         internal Task ErrorInStream(StreamId streamId, Exception exc)
@@ -113,7 +116,7 @@ namespace Orleans.Providers.Streams.SimpleMessageStream
                 // We got an item when we don't think we're the subscriber. This is a normal race condition.
                 // We can drop the item on the floor, or pass it to the rendezvous, or log a warning.
             }
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
 
@@ -135,7 +138,7 @@ namespace Orleans.Providers.Streams.SimpleMessageStream
                 // We got an item when we don't think we're the subscriber. This is a normal race condition.
                 // We can drop the item on the floor, or pass it to the rendezvous, or log a warning.
             }
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         public Task RemoveSubscriber(GuidId subscriptionId, StreamId streamId)
@@ -150,7 +153,7 @@ namespace Orleans.Providers.Streams.SimpleMessageStream
             {
                 consumers.RemoveRemoteSubscriber(subscriptionId);
             }
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
 
@@ -159,9 +162,13 @@ namespace Orleans.Providers.Streams.SimpleMessageStream
         internal class StreamConsumerExtensionCollection
         {
             private readonly ConcurrentDictionary<GuidId, Tuple<IStreamConsumerExtension, IStreamFilterPredicateWrapper>> consumers;
+            private readonly IStreamPubSub streamPubSub;
+            private readonly Logger logger;
 
-            internal StreamConsumerExtensionCollection()
+            internal StreamConsumerExtensionCollection(IStreamPubSub pubSub, Logger logger)
             {
+                streamPubSub = pubSub;
+                this.logger = logger;
                 consumers = new ConcurrentDictionary<GuidId, Tuple<IStreamConsumerExtension, IStreamFilterPredicateWrapper>>();
             }
 
@@ -180,10 +187,9 @@ namespace Orleans.Providers.Streams.SimpleMessageStream
                 }
             }
 
-            internal Task DeliverItem(StreamId streamId, object item, bool fireAndForgetDelivery)
+            internal Task DeliverItem(StreamId streamId, object item, bool fireAndForgetDelivery, bool optimizeForImmutableData)
             {
                 var tasks = fireAndForgetDelivery ? null : new List<Task>();
-                var immutableItem = new Immutable<object>(item);
                 foreach (KeyValuePair<GuidId, Tuple<IStreamConsumerExtension, IStreamFilterPredicateWrapper>> subscriptionKvp in consumers)
                 {
                     IStreamConsumerExtension remoteConsumer = subscriptionKvp.Value.Item1;
@@ -196,14 +202,35 @@ namespace Orleans.Providers.Streams.SimpleMessageStream
                             continue;
                     }
 
-                    Task task = remoteConsumer.DeliverItem(subscriptionKvp.Key, immutableItem, null, null);
+                    Task task = DeliverToRemote(remoteConsumer, streamId, subscriptionKvp.Key, item, optimizeForImmutableData);
                     if (fireAndForgetDelivery) task.Ignore();
                     else tasks.Add(task);
                 }
                 // If there's no subscriber, presumably we just drop the item on the floor
-                return fireAndForgetDelivery ? TaskDone.Done : Task.WhenAll(tasks);
+                return fireAndForgetDelivery ? Task.CompletedTask : Task.WhenAll(tasks);
             }
 
+            private async Task DeliverToRemote(IStreamConsumerExtension remoteConsumer, StreamId streamId, GuidId subscriptionId, object item, bool optimizeForImmutableData)
+            {
+                try
+                {
+                    if (optimizeForImmutableData)
+                        await remoteConsumer.DeliverImmutable(subscriptionId, streamId, new Immutable<object>(item), null, null);
+                    else
+                        await remoteConsumer.DeliverMutable(subscriptionId, streamId, item, null, null);
+                }
+                catch (ClientNotAvailableException)
+                {
+                    Tuple<IStreamConsumerExtension, IStreamFilterPredicateWrapper> discard;
+                    if (consumers.TryRemove(subscriptionId, out discard))
+                    {
+                        streamPubSub.UnregisterConsumer(subscriptionId, streamId, streamId.ProviderName).Ignore();
+                        logger.Warn(ErrorCode.Stream_ConsumerIsDead,
+                            "Consumer {0} on stream {1} is no longer active - permanently removing Consumer.", remoteConsumer, streamId);
+                    }
+                }
+            }
+        
             internal Task CompleteStream(StreamId streamId, bool fireAndForgetDelivery)
             {
                 var tasks = fireAndForgetDelivery ? null : new List<Task>();
@@ -216,7 +243,7 @@ namespace Orleans.Providers.Streams.SimpleMessageStream
                     else tasks.Add(task);
                 }
                 // If there's no subscriber, presumably we just drop the item on the floor
-                return fireAndForgetDelivery ? TaskDone.Done : Task.WhenAll(tasks);
+                return fireAndForgetDelivery ? Task.CompletedTask : Task.WhenAll(tasks);
             }
 
             internal Task ErrorInStream(StreamId streamId, Exception exc, bool fireAndForgetDelivery)
@@ -231,7 +258,7 @@ namespace Orleans.Providers.Streams.SimpleMessageStream
                     else tasks.Add(task);
                 }
                 // If there's no subscriber, presumably we just drop the item on the floor
-                return fireAndForgetDelivery ? TaskDone.Done : Task.WhenAll(tasks);
+                return fireAndForgetDelivery ? Task.CompletedTask : Task.WhenAll(tasks);
             }
         }
     }

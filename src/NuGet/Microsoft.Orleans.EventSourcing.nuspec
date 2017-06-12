@@ -4,11 +4,11 @@
     <id>Microsoft.Orleans.EventSourcing</id>
     <version>$version$</version>
     <title>Microsoft Orleans Event-Sourcing</title>
-    <authors>Microsoft Research</authors>
+    <authors>Microsoft</authors>
     <owners>Microsoft,Orleans</owners>
     <projectUrl>https://github.com/dotnet/Orleans</projectUrl>
     <licenseUrl>https://github.com/dotnet/Orleans#license</licenseUrl>
-    <iconUrl>https://raw.githubusercontent.com/jthelin/jthelin.github.io/master/images/Orleans-nuget.png</iconUrl>
+    <iconUrl>https://raw.githubusercontent.com/dotnet/orleans/gh-pages/assets/logo_128.png</iconUrl>
     <summary>
       Event-Sourcing support for Microsoft Orleans - OrleansEventSourcing.dll
     </summary>
@@ -22,9 +22,9 @@
     </dependencies>
   </metadata>
   <files>
-    <file src="OrleansEventSourcing.dll" target="lib\net451" />
-    <file src="OrleansEventSourcing.pdb" target="lib\net451" />
-    <file src="OrleansEventSourcing.xml" target="lib\net451" />
+    <file src="OrleansEventSourcing.dll" target="lib\net461" />
+    <file src="OrleansEventSourcing.pdb" target="lib\net461" />
+    <file src="OrleansEventSourcing.xml" target="lib\net461" />
     <file src="$SRC_DIR$OrleansEventSourcing\**\*.cs" target="src" />
   </files>
 </package>

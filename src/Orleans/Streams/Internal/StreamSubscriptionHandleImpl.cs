@@ -10,21 +10,19 @@ namespace Orleans.Streams
         private StreamImpl<T> streamImpl;
         private readonly IStreamFilterPredicateWrapper filterWrapper;
         private readonly GuidId subscriptionId;
+        private readonly bool isRewindable;
 
         [NonSerialized]
         private IAsyncObserver<T> observer;
         [NonSerialized]
         private StreamHandshakeToken expectedToken;
-
         internal bool IsValid { get { return streamImpl != null; } }
         internal GuidId SubscriptionId { get { return subscriptionId; } }
+        internal bool IsRewindable { get { return isRewindable; } }
 
-
+        public override string ProviderName { get { return this.streamImpl.ProviderName; } }
         public override IStreamIdentity StreamIdentity { get { return streamImpl; } }
         public override Guid HandleId { get { return subscriptionId.Guid; } }
-
-        // constructor used by serializator
-        private StreamSubscriptionHandleImpl() { }
 
         public StreamSubscriptionHandleImpl(GuidId subscriptionId, StreamImpl<T> streamImpl)
             : this(subscriptionId, null, streamImpl, null, null)
@@ -40,7 +38,11 @@ namespace Orleans.Streams
             this.observer = observer;
             this.streamImpl = streamImpl;
             this.filterWrapper = filterWrapper;
-            expectedToken = StreamHandshakeToken.CreateStartToken(token);
+            this.isRewindable = streamImpl.IsRewindable;
+            if (IsRewindable)
+            {
+                expectedToken = StreamHandshakeToken.CreateStartToken(token);
+            }
         }
 
         public void Invalidate()
@@ -68,6 +70,7 @@ namespace Orleans.Streams
 
         public async Task<StreamHandshakeToken> DeliverBatch(IBatchContainer batch, StreamHandshakeToken handshakeToken)
         {
+            // we validate expectedToken only for ordered (rewindable) streams
             if (expectedToken != null)
             {
                 if (!expectedToken.Equals(handshakeToken))
@@ -79,8 +82,10 @@ namespace Orleans.Streams
                 await NextItem(itemTuple.Item1, itemTuple.Item2);
             }
 
-            expectedToken = StreamHandshakeToken.CreateDeliveyToken(batch.SequenceToken);
-
+            if (IsRewindable)
+            {
+                expectedToken = StreamHandshakeToken.CreateDeliveyToken(batch.SequenceToken);
+            }
             return null;
         }
 
@@ -100,9 +105,10 @@ namespace Orleans.Streams
                 if (!expectedToken.Equals(handshakeToken))
                     return expectedToken;
             }
-
-            expectedToken = StreamHandshakeToken.CreateDeliveyToken(currentToken);
-
+            if (IsRewindable)
+            {
+                expectedToken = StreamHandshakeToken.CreateDeliveyToken(currentToken);
+            }
             return null;
         }
 
@@ -123,22 +129,22 @@ namespace Orleans.Streams
             // This method could potentially be invoked after Dispose() has been called, 
             // so we have to ignore the request or we risk breaking unit tests AQ_01 - AQ_04.
             if (observer == null || !IsValid)
-                return TaskDone.Done;
+                return Task.CompletedTask;
 
             if (filterWrapper != null && !filterWrapper.ShouldReceive(streamImpl, filterWrapper.FilterData, typedItem))
-                return TaskDone.Done;
+                return Task.CompletedTask;
 
             return observer.OnNextAsync(typedItem, token);
         }
 
         public Task CompleteStream()
         {
-            return observer == null ? TaskDone.Done : observer.OnCompletedAsync();
+            return observer == null ? Task.CompletedTask : observer.OnCompletedAsync();
         }
 
         public Task ErrorInStream(Exception ex)
         {
-            return observer == null ? TaskDone.Done : observer.OnErrorAsync(ex);
+            return observer == null ? Task.CompletedTask : observer.OnErrorAsync(ex);
         }
 
         internal bool SameStreamId(StreamId streamId)

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -41,7 +42,7 @@ namespace Orleans.Runtime.Configuration
         /// The host name or IP address of this silo.
         /// This is a configurable IP address or Hostname.
         /// </summary>
-        public string HostNameOrIPAddress { get; set; } 
+        public string HostNameOrIPAddress { get; set; }
         private IPAddress Address { get { return ClusterConfiguration.ResolveIPAddress(HostNameOrIPAddress, Subnet, AddressType).GetResult(); } }
 
         /// <summary>
@@ -88,7 +89,7 @@ namespace Orleans.Runtime.Configuration
         /// <summary>
         /// The MaxActiveThreads attribute specifies the maximum number of simultaneous active threads the scheduler will allow.
         /// Generally this number should be roughly equal to the number of cores on the node.
-        /// Using a value of 0 will look at System.Environment.ProcessorCount to decide the number instead.
+        /// Using a value of 0 will look at System.Environment.ProcessorCount to decide the number instead, which is only valid when set from xml config
         /// </summary>
         public int MaxActiveThreads { get; set; }
 
@@ -111,7 +112,7 @@ namespace Orleans.Runtime.Configuration
         /// </summary>
         public TimeSpan TurnWarningLengthThreshold { get; set; }
 
-        internal bool InjectMoreWorkerThreads { get; set; }
+        internal bool EnableWorkerThreadInjection { get; set; }
 
         /// <summary>
         /// The LoadShedding element specifies the gateway load shedding configuration for the node.
@@ -140,9 +141,6 @@ namespace Orleans.Runtime.Configuration
         /// <summary>
         /// </summary>
         public IList<Tuple<string, Severity>> TraceLevelOverrides { get; private set; }
-        /// <summary>
-        /// </summary>
-        public bool WriteMessagingTraces { get; set; }
         /// <summary>
         /// </summary>
         public bool TraceToConsole { get; set; }
@@ -200,15 +198,6 @@ namespace Orleans.Runtime.Configuration
         /// </summary>
         public StatisticsLevel StatisticsCollectionLevel { get; set; }
 
-        private string workingStoreDir;
-        /// <summary>
-        /// </summary>
-        internal string WorkingStorageDirectory
-        {
-            get { return workingStoreDir ?? (workingStoreDir = GetDefaultWorkingStoreDirectory()); }
-            set { workingStoreDir = value; }
-        }
-
         /// <summary>
         /// </summary>
         public int MinDotNetThreadPoolSize { get; set; }
@@ -222,6 +211,10 @@ namespace Orleans.Runtime.Configuration
         /// </summary>
         public bool UseNagleAlgorithm { get; set; }
 
+        public Dictionary<string, SearchOption> AdditionalAssemblyDirectories { get; set; }
+
+        public List<string> ExcludedGrainTypes { get; set; }
+
         public string SiloShutdownEventName { get; set; }
 
         internal const string DEFAULT_NODE_NAME = "default";
@@ -230,11 +223,10 @@ namespace Orleans.Runtime.Configuration
         private static readonly TimeSpan DEFAULT_STATS_LOG_WRITE_PERIOD = TimeSpan.FromMinutes(5);
         internal static readonly StatisticsLevel DEFAULT_STATS_COLLECTION_LEVEL = StatisticsLevel.Info;
         private static readonly int DEFAULT_MAX_ACTIVE_THREADS = Math.Max(4, System.Environment.ProcessorCount);
-        internal static readonly int DEFAULT_MAX_LOCAL_ACTIVATIONS = System.Environment.ProcessorCount;
         private const int DEFAULT_MIN_DOT_NET_THREAD_POOL_SIZE = 200;
         private static readonly int DEFAULT_MIN_DOT_NET_CONNECTION_LIMIT = DEFAULT_MIN_DOT_NET_THREAD_POOL_SIZE;
         private static readonly TimeSpan DEFAULT_ACTIVATION_SCHEDULING_QUANTUM = TimeSpan.FromMilliseconds(100);
-        internal const bool INJECT_MORE_WORKER_THREADS = false;
+        internal const bool ENABLE_WORKER_THREAD_INJECTION = false;
 
         public NodeConfiguration()
         {
@@ -248,20 +240,19 @@ namespace Orleans.Runtime.Configuration
             AddressType = AddressFamily.InterNetwork;
             ProxyGatewayEndpoint = null;
 
-            MaxActiveThreads = DEFAULT_MAX_ACTIVE_THREADS; 
+            MaxActiveThreads = DEFAULT_MAX_ACTIVE_THREADS;
             DelayWarningThreshold = TimeSpan.FromMilliseconds(10000); // 10,000 milliseconds
             ActivationSchedulingQuantum = DEFAULT_ACTIVATION_SCHEDULING_QUANTUM;
             TurnWarningLengthThreshold = TimeSpan.FromMilliseconds(200);
-            InjectMoreWorkerThreads = INJECT_MORE_WORKER_THREADS;
+            EnableWorkerThreadInjection = ENABLE_WORKER_THREAD_INJECTION;
 
             LoadSheddingEnabled = false;
             LoadSheddingLimit = 95;
 
             DefaultTraceLevel = Severity.Info;
             TraceLevelOverrides = new List<Tuple<string, Severity>>();
-            TraceToConsole = true;
+            TraceToConsole = ConsoleText.IsConsoleAvailable;
             TraceFilePattern = "{0}-{1}.log";
-            WriteMessagingTraces = false;
             LargeMessageWarningThreshold = Constants.LARGE_OBJECT_HEAP_THRESHOLD;
             PropagateActivityId = Constants.DEFAULT_PROPAGATE_E2E_ACTIVITY_ID;
             BulkMessageLimit = Constants.DEFAULT_LOGGER_BULK_MESSAGE_LIMIT;
@@ -280,6 +271,9 @@ namespace Orleans.Runtime.Configuration
             Expect100Continue = false;
             DefaultConnectionLimit = DEFAULT_MIN_DOT_NET_CONNECTION_LIMIT;
             UseNagleAlgorithm = false;
+
+            AdditionalAssemblyDirectories = new Dictionary<string, SearchOption>();
+            ExcludedGrainTypes = new List<string>();
         }
 
         public NodeConfiguration(NodeConfiguration other)
@@ -298,7 +292,7 @@ namespace Orleans.Runtime.Configuration
             DelayWarningThreshold = other.DelayWarningThreshold;
             ActivationSchedulingQuantum = other.ActivationSchedulingQuantum;
             TurnWarningLengthThreshold = other.TurnWarningLengthThreshold;
-            InjectMoreWorkerThreads = other.InjectMoreWorkerThreads;
+            EnableWorkerThreadInjection = other.EnableWorkerThreadInjection;
 
             LoadSheddingEnabled = other.LoadSheddingEnabled;
             LoadSheddingLimit = other.LoadSheddingLimit;
@@ -308,7 +302,6 @@ namespace Orleans.Runtime.Configuration
             TraceToConsole = other.TraceToConsole;
             TraceFilePattern = other.TraceFilePattern;
             TraceFileName = other.TraceFileName;
-            WriteMessagingTraces = other.WriteMessagingTraces;
             LargeMessageWarningThreshold = other.LargeMessageWarningThreshold;
             PropagateActivityId = other.PropagateActivityId;
             BulkMessageLimit = other.BulkMessageLimit;
@@ -330,6 +323,8 @@ namespace Orleans.Runtime.Configuration
             UseNagleAlgorithm = other.UseNagleAlgorithm;
 
             StartupTypeName = other.StartupTypeName;
+            AdditionalAssemblyDirectories = new Dictionary<string, SearchOption>(other.AdditionalAssemblyDirectories);
+            ExcludedGrainTypes = other.ExcludedGrainTypes.ToList();
         }
 
         public override string ToString()
@@ -358,14 +353,16 @@ namespace Orleans.Runtime.Configuration
             sb.Append("      ").Append("   Delay Warning Threshold: ").Append(DelayWarningThreshold).AppendLine();
             sb.Append("      ").Append("   Activation Scheduling Quantum: ").Append(ActivationSchedulingQuantum).AppendLine();
             sb.Append("      ").Append("   Turn Warning Length Threshold: ").Append(TurnWarningLengthThreshold).AppendLine();
-            sb.Append("      ").Append("   Inject More Worker Threads: ").Append(InjectMoreWorkerThreads).AppendLine();
+            sb.Append("      ").Append("   Inject More Worker Threads: ").Append(EnableWorkerThreadInjection).AppendLine();
             sb.Append("      ").Append("   MinDotNetThreadPoolSize: ").Append(MinDotNetThreadPoolSize).AppendLine();
+#if !NETSTANDARD_TODO
             int workerThreads;
             int completionPortThreads;
             ThreadPool.GetMinThreads(out workerThreads, out completionPortThreads);
             sb.Append("      ").AppendFormat("   .NET thread pool sizes - Min: Worker Threads={0} Completion Port Threads={1}", workerThreads, completionPortThreads).AppendLine();
             ThreadPool.GetMaxThreads(out workerThreads, out completionPortThreads);
             sb.Append("      ").AppendFormat("   .NET thread pool sizes - Max: Worker Threads={0} Completion Port Threads={1}", workerThreads, completionPortThreads).AppendLine();
+#endif
             sb.Append("      ").AppendFormat("   .NET ServicePointManager - DefaultConnectionLimit={0} Expect100Continue={1} UseNagleAlgorithm={2}", DefaultConnectionLimit, Expect100Continue, UseNagleAlgorithm).AppendLine();
             sb.Append("   Load Shedding Enabled: ").Append(LoadSheddingEnabled).AppendLine();
             sb.Append("   Load Shedding Limit: ").Append(LoadSheddingLimit).AppendLine();
@@ -457,12 +454,12 @@ namespace Orleans.Runtime.Configuration
                     case "LoadShedding":
                         if (child.HasAttribute("Enabled"))
                         {
-                            LoadSheddingEnabled = ConfigUtilities.ParseBool(child.GetAttribute("Enabled"), 
+                            LoadSheddingEnabled = ConfigUtilities.ParseBool(child.GetAttribute("Enabled"),
                                 "Invalid boolean value for Enabled attribute on LoadShedding attribute for " + SiloName);
                         }
                         if (child.HasAttribute("LoadLimit"))
                         {
-                            LoadSheddingLimit = ConfigUtilities.ParseInt(child.GetAttribute("LoadLimit"), 
+                            LoadSheddingLimit = ConfigUtilities.ParseInt(child.GetAttribute("LoadLimit"),
                                 "Invalid integer value for LoadLimit attribute on LoadShedding attribute for " + SiloName);
                             if (LoadSheddingLimit < 0)
                             {
@@ -492,15 +489,11 @@ namespace Orleans.Runtime.Configuration
                     case "Telemetry":
                         ConfigUtilities.ParseTelemetry(child);
                         break;
+                    case "AdditionalAssemblyDirectories":
+                        ConfigUtilities.ParseAdditionalAssemblyDirectories(AdditionalAssemblyDirectories, child);
+                        break;
                 }
             }
-        }
-
-        private string GetDefaultWorkingStoreDirectory()
-        {
-            string workingStoreLocation = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolderOption.DoNotVerify);
-            string cacheDirBase = Path.Combine(workingStoreLocation, "OrleansData");
-            return cacheDirBase;
         }
     }
 }

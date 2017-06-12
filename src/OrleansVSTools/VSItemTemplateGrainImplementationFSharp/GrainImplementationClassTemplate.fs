@@ -5,7 +5,7 @@ open System.Threading.Tasks
 open Orleans
 
 type $safeitemname$() = 
-    inherit Orleans.GrainBase()
+    inherit Grain()
 
     interface I$safeitemname$ with   // Replace grain interface
 

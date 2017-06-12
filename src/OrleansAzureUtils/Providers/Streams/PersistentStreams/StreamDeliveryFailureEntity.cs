@@ -40,7 +40,15 @@ namespace Orleans.Providers.Streams.PersistentStreams
         /// </summary>
         public virtual void SetPartitionKey(string deploymentId)
         {
-            PartitionKey = String.Format("DeliveryFailure_{0}_{1}", StreamProviderName, deploymentId);
+            PartitionKey = MakeDefaultPartitionKey(StreamProviderName, deploymentId);
+        }
+
+        /// <summary>
+        /// Default partition key
+        /// </summary>
+        public static string MakeDefaultPartitionKey(string streamProviderName, string deploymentId)
+        {
+            return $"DeliveryFailure_{streamProviderName}_{deploymentId}";
         }
 
         /// <summary>
@@ -48,25 +56,26 @@ namespace Orleans.Providers.Streams.PersistentStreams
         /// </summary>
         public virtual void SetRowkey()
         {
-            RowKey = String.Format("{0:x16}_{1}", ReverseOrderTimestampTicks(), Guid.NewGuid());
+            RowKey = $"{ReverseOrderTimestampTicks():x16}_{Guid.NewGuid()}";
         }
 
         /// <summary>
         /// Sets sequence token by serializing it to property.
         /// </summary>
+        /// <param name="serializationManager"></param>
         /// <param name="token"></param>
-        public virtual void SetSequenceToken(StreamSequenceToken token)
+        public virtual void SetSequenceToken(SerializationManager serializationManager, StreamSequenceToken token)
         {
-            SequenceToken = token != null ? GetTokenBytes(token) : null;
+            SequenceToken = token != null ? GetTokenBytes(serializationManager, token) : null;
         }
 
         /// <summary>
         /// Gets sequence token by deserializing it from property.
         /// </summary>
         /// <returns></returns>
-        public virtual StreamSequenceToken GetSequenceToken()
+        public virtual StreamSequenceToken GetSequenceToken(SerializationManager serializationManager)
         {
-            return SequenceToken != null ? TokenFromBytes(SequenceToken) : null;
+            return SequenceToken != null ? TokenFromBytes(serializationManager, SequenceToken) : null;
         }
 
         /// <summary>
@@ -79,23 +88,25 @@ namespace Orleans.Providers.Streams.PersistentStreams
         ///  key with some other field (stream namespace?).
         /// </remarks>
         /// <returns></returns>
-        static protected long ReverseOrderTimestampTicks()
+        protected static long ReverseOrderTimestampTicks()
         {
             var now = DateTime.UtcNow;
             return DateTime.MaxValue.Ticks - now.Ticks;
         }
 
-        static private byte[] GetTokenBytes(StreamSequenceToken token)
+        private static byte[] GetTokenBytes(SerializationManager serializationManager, StreamSequenceToken token)
         {
             var bodyStream = new BinaryTokenStreamWriter();
-            SerializationManager.Serialize(token, bodyStream);
-            return bodyStream.ToByteArray();
+            serializationManager.Serialize(token, bodyStream);
+            var result = bodyStream.ToByteArray();
+            bodyStream.ReleaseBuffers();
+            return result;
         }
 
-        static private StreamSequenceToken TokenFromBytes(byte[] bytes)
+        private static StreamSequenceToken TokenFromBytes(SerializationManager serializationManager, byte[] bytes)
         {
             var stream = new BinaryTokenStreamReader(bytes);
-            return SerializationManager.Deserialize<StreamSequenceToken>(stream);
+            return serializationManager.Deserialize<StreamSequenceToken>(stream);
         }
     }
 }

@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading;
 using Orleans.Runtime.Configuration;
 
 namespace Orleans.Runtime
@@ -8,11 +10,13 @@ namespace Orleans.Runtime
     internal class SocketManager
     {
         private readonly LRU<IPEndPoint, Socket> cache;
+        private TimeSpan connectionTimeout;
 
         private const int MAX_SOCKETS = 200;
 
         internal SocketManager(IMessagingConfiguration config)
         {
+            connectionTimeout = config.OpenConnectionTimeout;
             cache = new LRU<IPEndPoint, Socket>(MAX_SOCKETS, config.MaxSocketAge, SendingSocketCreator);
             cache.RaiseFlushEvent += FlushHandler;
         }
@@ -59,16 +63,24 @@ namespace Orleans.Runtime
             var s = new Socket(target.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
             try
             {
-                s.Connect(target);
+                Connect(s, target, connectionTimeout);
                 // Prep the socket so it will reset on close and won't Nagle
                 s.LingerState = new LingerOption(true, 0);
                 s.NoDelay = true;
-                WriteConnectionPreemble(s, Constants.SiloDirectConnectionId); // Identifies this client as a direct silo-to-silo socket
+                WriteConnectionPreamble(s, Constants.SiloDirectConnectionId); // Identifies this client as a direct silo-to-silo socket
                 // Start an asynch receive off of the socket to detect closure
-                var foo = new byte[4];
-                s.BeginReceive(foo, 0, 1, SocketFlags.None, ReceiveCallback,
-                    new Tuple<Socket, IPEndPoint, SocketManager>(s, target, this));
+                var receiveAsyncEventArgs = new SocketAsyncEventArgs
+                {
+                    BufferList = new List<ArraySegment<byte>> { new ArraySegment<byte>(new byte[4]) },
+                    UserToken = new Tuple<Socket, IPEndPoint, SocketManager>(s, target, this)
+                };
+                receiveAsyncEventArgs.Completed += ReceiveCallback;
+                bool receiveCompleted = s.ReceiveAsync(receiveAsyncEventArgs);
                 NetworkingStatisticsGroup.OnOpenedSendingSocket();
+                if (!receiveCompleted)
+                {
+                    ReceiveCallback(this, receiveAsyncEventArgs);
+                }
             }
             catch (Exception)
             {
@@ -85,7 +97,7 @@ namespace Orleans.Runtime
             return s;
         }
 
-        internal static void WriteConnectionPreemble(Socket socket, GrainId grainId)
+        internal static void WriteConnectionPreamble(Socket socket, GrainId grainId)
         {
             int size = 0;
             byte[] grainIdByteArray = null;
@@ -112,32 +124,20 @@ namespace Orleans.Runtime
         // We start an asynch receive, with this callback, off of every send socket.
         // Since we should never see data coming in on these sockets, having the receive complete means that
         // the socket is in an unknown state and we should close it and try again.
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes")]
-        private static void ReceiveCallback(IAsyncResult result)
+        private static void ReceiveCallback(object sender, SocketAsyncEventArgs socketAsyncEventArgs)
         {
+            var t = socketAsyncEventArgs.UserToken as Tuple<Socket, IPEndPoint, SocketManager>;
             try
             {
-                var t = result.AsyncState as Tuple<Socket, IPEndPoint, SocketManager>;
-                if (t == null) return;
-                if (!t.Item3.cache.ContainsKey(t.Item2)) return;
-
-                try
-                {
-                    t.Item1.EndReceive(result);
-                }
-                catch (Exception)
-                {
-                    // ignore
-                }
-                finally
-                {
-                    // Resolve potential race condition with this cache entry being updated since ContainsKey was called. TFS 180717.
-                    t.Item3.InvalidateEntry(t.Item2);
-                }
+                t?.Item3.InvalidateEntry(t.Item2);
             }
             catch (Exception ex)
             {
-                TraceLogger.GetLogger("SocketManager", TraceLogger.LoggerType.Runtime).Error(ErrorCode.Messaging_Socket_ReceiveError, String.Format("ReceiveCallback: {0}",result), ex);
+                LogManager.GetLogger("SocketManager", LoggerType.Runtime).Error(ErrorCode.Messaging_Socket_ReceiveError, $"ReceiveCallback: {t?.Item2}", ex);
+            }
+            finally
+            {
+                socketAsyncEventArgs.Dispose();
             }
         }
 
@@ -174,6 +174,28 @@ namespace Orleans.Runtime
             cache.Clear();
         }
 
+        /// <summary>
+        /// Connect the socket to the target endpoint
+        /// </summary>
+        /// <param name="s">The socket</param>
+        /// <param name="endPoint">The target endpoint</param>
+        /// <param name="connectionTimeout">The timeout value to use when opening the connection</param>
+        /// <exception cref="TimeoutException">When the connection could not be established in time</exception>
+        internal static void Connect(Socket s, IPEndPoint endPoint, TimeSpan connectionTimeout)
+        {
+            var signal = new AutoResetEvent(false);
+            var e = new SocketAsyncEventArgs();
+            e.RemoteEndPoint = endPoint;
+            e.Completed += (sender, eventArgs) => signal.Set();
+            s.ConnectAsync(e);
+
+            if (!signal.WaitOne(connectionTimeout))
+                throw new TimeoutException($"Connection to {endPoint} could not be established in {connectionTimeout}");
+
+            if (e.SocketError != SocketError.Success || !s.Connected)
+                throw new OrleansException($"Could not connect to {endPoint}: {e.SocketError}");
+        }
+
         [System.Diagnostics.CodeAnalysis.SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes")]
         internal static void CloseSocket(Socket s)
         {
@@ -196,6 +218,7 @@ namespace Orleans.Runtime
                 // Ignore
             }
 
+#if !NETSTANDARD
             try
             {
                 s.Disconnect(false);
@@ -204,7 +227,7 @@ namespace Orleans.Runtime
             {
                 // Ignore
             }
-
+#endif
             try
             {
                 s.Dispose();

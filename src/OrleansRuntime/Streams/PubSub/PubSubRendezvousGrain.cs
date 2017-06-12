@@ -1,17 +1,17 @@
 using System;
-using System.Linq;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
-using Orleans.CodeGeneration;
 using Orleans.Runtime;
+using Orleans.Streams.Core;
 
 namespace Orleans.Streams
 {
     [Serializable]
     internal class PubSubGrainState
     {
-        public HashSet<PubSubPublisherState> Producers { get; set; }
-        public HashSet<PubSubSubscriptionState> Consumers { get; set; }
+        public HashSet<PubSubPublisherState> Producers { get; set; } = new HashSet<PubSubPublisherState>();
+        public HashSet<PubSubSubscriptionState> Consumers { get; set; } = new HashSet<PubSubSubscriptionState>();
     }
 
     [Orleans.Providers.StorageProvider(ProviderName = "PubSubStore")]
@@ -26,6 +26,7 @@ namespace Orleans.Streams
         private static readonly CounterStatistic counterConsumersAdded;
         private static readonly CounterStatistic counterConsumersRemoved;
         private static readonly CounterStatistic counterConsumersTotal;
+        private readonly ISiloStatusOracle siloStatusOracle;
 
         static PubSubRendezvousGrain()
         {
@@ -37,15 +38,15 @@ namespace Orleans.Streams
             counterConsumersTotal   = CounterStatistic.FindOrCreate(StatisticNames.STREAMS_PUBSUB_CONSUMERS_TOTAL);
         }
 
+        public PubSubRendezvousGrain(ISiloStatusOracle siloStatusOracle)
+        {
+            this.siloStatusOracle = siloStatusOracle;
+        }
+
         public override async Task OnActivateAsync()
         {
-            logger = GetLogger(this.GetType().Name + "-" + RuntimeIdentity + "-" + IdentityString);
+            logger = GetLogger(GetType().Name + "-" + RuntimeIdentity + "-" + IdentityString);
             LogPubSubCounts("OnActivateAsync");
-
-            if (State.Consumers == null)
-                State.Consumers = new HashSet<PubSubSubscriptionState>();
-            if (State.Producers == null)
-                State.Producers = new HashSet<PubSubPublisherState>();
 
             int numRemoved = RemoveDeadProducers();
             if (numRemoved > 0)
@@ -56,14 +57,13 @@ namespace Orleans.Streams
                     await ClearStateAsync(); //State contains no producers or consumers, remove it from storage
             }
 
-            if (logger.IsVerbose)
-                logger.Info("OnActivateAsync-Done");
+            logger.Verbose("OnActivateAsync-Done");
         }
 
         public override Task OnDeactivateAsync()
         {
             LogPubSubCounts("OnDeactivateAsync");
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         private int RemoveDeadProducers()
@@ -76,60 +76,83 @@ namespace Orleans.Streams
             if (numRemoved > 0)
             {
                 LogPubSubCounts("RemoveDeadProducers: removed {0} outdated producers", numRemoved);
-                counterProducersRemoved.Increment();
-                counterProducersTotal.DecrementBy(numRemoved);
             }
             return numRemoved;
         }
 
         /// accept and notify only Active producers.
-        private static bool IsActiveProducer(IStreamProducerExtension producer)
+        private bool IsActiveProducer(IStreamProducerExtension producer)
         {
             var grainRef = producer as GrainReference;
             if (grainRef !=null && grainRef.GrainId.IsSystemTarget && grainRef.IsInitializedSystemTarget)
-                return RuntimeClient.Current.GetSiloStatus(grainRef.SystemTargetSilo).Equals(SiloStatus.Active);
+                return siloStatusOracle.GetApproximateSiloStatus(grainRef.SystemTargetSilo) == SiloStatus.Active;
             
             return true;
         }
 
-        private static bool IsDeadProducer(IStreamProducerExtension producer)
+        private bool IsDeadProducer(IStreamProducerExtension producer)
         {
             var grainRef = producer as GrainReference;
             if (grainRef != null && grainRef.GrainId.IsSystemTarget && grainRef.IsInitializedSystemTarget)
-                return RuntimeClient.Current.GetSiloStatus(grainRef.SystemTargetSilo).Equals(SiloStatus.Dead);
+                return siloStatusOracle.GetApproximateSiloStatus(grainRef.SystemTargetSilo) == SiloStatus.Dead;
             
             return false;
         }
 
         public async Task<ISet<PubSubSubscriptionState>> RegisterProducer(StreamId streamId, IStreamProducerExtension streamProducer)
         {
-            if (!IsActiveProducer(streamProducer))
-                throw new ArgumentException(String.Format("Trying to register non active IStreamProducerExtension: {0}", streamProducer.ToString()), "streamProducer");
-            
-            RemoveDeadProducers();
-            
-            var publisherState = new PubSubPublisherState(streamId, streamProducer);
-            State.Producers.Add(publisherState);
             counterProducersAdded.Increment();
-            counterProducersTotal.Increment();
-            LogPubSubCounts("RegisterProducer {0}", streamProducer);
-            await WriteStateAsync();
+            if (!IsActiveProducer(streamProducer))
+                throw new ArgumentException($"Trying to register non active IStreamProducerExtension: {streamProducer}", "streamProducer");
+
+            try
+            {
+                int producersRemoved = RemoveDeadProducers();
+
+                var publisherState = new PubSubPublisherState(streamId, streamProducer);
+                State.Producers.Add(publisherState);
+                LogPubSubCounts("RegisterProducer {0}", streamProducer);
+                await WriteStateAsync();
+                counterProducersTotal.DecrementBy(producersRemoved);
+                counterProducersTotal.Increment();
+            }
+            catch (Exception exc)
+            {
+                logger.Error(ErrorCode.Stream_RegisterProducerFailed, $"Failed to register a stream producer.  Stream: {streamId}, Producer: {streamProducer}", exc);
+                // Corrupted state, deactivate grain.
+                DeactivateOnIdle();
+                throw;
+            }
             return State.Consumers.Where(c => !c.IsFaulted).ToSet();
         }
 
         public async Task UnregisterProducer(StreamId streamId, IStreamProducerExtension streamProducer)
         {
-            int numRemoved = State.Producers.RemoveWhere(s => s.Equals(streamId, streamProducer));
             counterProducersRemoved.Increment();
-            counterProducersTotal.DecrementBy(numRemoved);
-            LogPubSubCounts("UnregisterProducer {0} NumRemoved={1}", streamProducer, numRemoved);
+            try
+            {
+                int numRemoved = State.Producers.RemoveWhere(s => s.Equals(streamId, streamProducer));
+                LogPubSubCounts("UnregisterProducer {0} NumRemoved={1}", streamProducer, numRemoved);
 
-            if (numRemoved > 0)
-                await WriteStateAsync();
-            
+                if (numRemoved > 0)
+                {
+                    Task updateStorageTask = State.Producers.Count == 0 && State.Consumers.Count == 0
+                        ? ClearStateAsync() //State contains no producers or consumers, remove it from storage
+                        : WriteStateAsync();
+                    await updateStorageTask;
+                }
+                counterProducersTotal.DecrementBy(numRemoved);
+            }
+            catch (Exception exc)
+            {
+                logger.Error(ErrorCode.Stream_UnegisterProducerFailed,
+                    $"Failed to unregister a stream producer.  Stream: {streamId}, Producer: {streamProducer}", exc);
+                // Corrupted state, deactivate grain.
+                DeactivateOnIdle();
+                throw;
+            }
             if (State.Producers.Count == 0 && State.Consumers.Count == 0)
             {
-                await ClearStateAsync(); //State contains no producers or consumers, remove it from storage
                 DeactivateOnIdle(); // No producers or consumers left now, so flag ourselves to expedite Deactivation
             }
         }
@@ -140,37 +163,48 @@ namespace Orleans.Streams
             IStreamConsumerExtension streamConsumer, 
             IStreamFilterPredicateWrapper filter)
         {
+            counterConsumersAdded.Increment();
             PubSubSubscriptionState pubSubState = State.Consumers.FirstOrDefault(s => s.Equals(subscriptionId));
-            if (pubSubState == null)
+            if (pubSubState != null && pubSubState.IsFaulted)
+                throw new FaultedSubscriptionException(subscriptionId, streamId);
+            try
             {
-                pubSubState = new PubSubSubscriptionState(subscriptionId, streamId, streamConsumer);
-                State.Consumers.Add(pubSubState);
+                if (pubSubState == null)
+                {
+                    pubSubState = new PubSubSubscriptionState(subscriptionId, streamId, streamConsumer);
+                    State.Consumers.Add(pubSubState);
+                }
+
+                if (filter != null)
+                    pubSubState.AddFilter(filter);
+
+                LogPubSubCounts("RegisterConsumer {0}", streamConsumer);
+                await WriteStateAsync();
+                counterConsumersTotal.Increment();
+            }
+            catch (Exception exc)
+            {
+                logger.Error(ErrorCode.Stream_RegisterConsumerFailed,
+                    $"Failed to register a stream consumer.  Stream: {streamId}, SubscriptionId {subscriptionId}, Consumer: {streamConsumer}", exc);
+                // Corrupted state, deactivate grain.
+                DeactivateOnIdle();
+                throw;
             }
 
-            if (pubSubState.IsFaulted)
-                throw new FaultedSubscriptionException(subscriptionId, streamId);
-
-            if (filter != null)
-                pubSubState.AddFilter(filter);
-            
-            counterConsumersAdded.Increment();
-            counterConsumersTotal.Increment();
-
-            LogPubSubCounts("RegisterConsumer {0}", streamConsumer);
-            await WriteStateAsync();
-
             int numProducers = State.Producers.Count;
-            if (numProducers > 0)
-            {
-                if (logger.IsVerbose)
-                    logger.Info("Notifying {0} existing producer(s) about new consumer {1}. Producers={2}", 
-                        numProducers, streamConsumer, Utils.EnumerableToString(State.Producers));
-                
-                // Notify producers about a new streamConsumer.
-                var tasks = new List<Task>();
-                var producers = State.Producers.ToList();
-                bool someProducersRemoved = false;
+            if (numProducers <= 0)
+                return;
 
+            if (logger.IsVerbose)
+                logger.Info("Notifying {0} existing producer(s) about new consumer {1}. Producers={2}", 
+                    numProducers, streamConsumer, Utils.EnumerableToString(State.Producers));
+                
+            // Notify producers about a new streamConsumer.
+            var tasks = new List<Task>();
+            var producers = State.Producers.ToList();
+            int initialProducerCount = producers.Count;
+            try
+            {
                 foreach (var producerState in producers)
                 {
                     PubSubPublisherState producer = producerState; // Capture loop variable
@@ -182,33 +216,7 @@ namespace Orleans.Streams
                         continue;
                     }
 
-                    Task addSubscriberPromise = producer.Producer.AddSubscriber(subscriptionId, streamId, streamConsumer, filter)
-                        .ContinueWith(t =>
-                        {
-                            if (t.IsFaulted)
-                            {
-                                var exc = t.Exception.GetBaseException();
-                                if (exc is GrainExtensionNotInstalledException)
-                                {
-                                    logger.Warn((int) ErrorCode.Stream_ProducerIsDead,
-                                        "Producer {0} on stream {1} is no longer active - discarding.", 
-                                        producer, streamId);
-
-                                    // This publisher has gone away, so we should cleanup pub-sub state.
-                                    bool removed = State.Producers.Remove(producer);
-                                    someProducersRemoved = true; // Re-save state changes at end
-                                    counterProducersRemoved.Increment();
-                                    counterProducersTotal.DecrementBy(removed ? 1 : 0);
-
-                                    // And ignore this error
-                                }
-                                else
-                                {
-                                    throw exc;
-                                }
-                            }
-                        }, TaskContinuationOptions.ExecuteSynchronously);
-                    tasks.Add(addSubscriberPromise);
+                    tasks.Add(NotifyProducerOfNewSubscriber(producer, subscriptionId, streamId, streamConsumer, filter));
                 }
 
                 Exception exception = null;
@@ -221,28 +229,87 @@ namespace Orleans.Streams
                     exception = exc;
                 }
 
-                if (someProducersRemoved)
+                // if the number of producers has been changed, resave state.
+                if (State.Producers.Count != initialProducerCount)
+                {
                     await WriteStateAsync();
+                    counterConsumersTotal.DecrementBy(initialProducerCount - State.Producers.Count);
+                }
 
                 if (exception != null)
+                {
                     throw exception;
+                }
             }
+            catch (Exception exc)
+            {
+                logger.Error(ErrorCode.Stream_RegisterConsumerFailed,
+                    $"Failed to update producers while register a stream consumer.  Stream: {streamId}, SubscriptionId {subscriptionId}, Consumer: {streamConsumer}", exc);
+                // Corrupted state, deactivate grain.
+                DeactivateOnIdle();
+                throw;
+            }
+        }
+
+        private async Task NotifyProducerOfNewSubscriber(PubSubPublisherState producer, GuidId subscriptionId, StreamId streamId,
+            IStreamConsumerExtension streamConsumer, IStreamFilterPredicateWrapper filter)
+        {
+            try
+            {
+                await producer.Producer.AddSubscriber(subscriptionId, streamId, streamConsumer, filter);
+            }
+            catch (GrainExtensionNotInstalledException)
+            {
+                RemoveProducer(producer);
+            }
+            catch (ClientNotAvailableException)
+            {
+                RemoveProducer(producer);
+            }
+        }
+
+        private void RemoveProducer(PubSubPublisherState producer)
+        {
+            logger.Warn(ErrorCode.Stream_ProducerIsDead,
+                "Producer {0} on stream {1} is no longer active - permanently removing producer.",
+                producer, producer.Stream);
+
+            State.Producers.Remove(producer);
         }
 
         public async Task UnregisterConsumer(GuidId subscriptionId, StreamId streamId)
         {
-            if(State.Consumers.Any(c => c.IsFaulted && c.Equals(subscriptionId)))
-                throw new FaultedSubscriptionException(subscriptionId, streamId);
-
-            int numRemoved = State.Consumers.RemoveWhere(c => c.Equals(subscriptionId));
             counterConsumersRemoved.Increment();
-            counterConsumersTotal.DecrementBy(numRemoved);
 
-            LogPubSubCounts("UnregisterSubscription {0} NumRemoved={1}", subscriptionId, numRemoved);
+            try
+            {
+                int numRemoved = State.Consumers.RemoveWhere(c => c.Equals(subscriptionId));
 
-            await WriteStateAsync();
-            await NotifyProducersOfRemovedSubscription(subscriptionId, streamId);
-            await ClearStateWhenEmpty();
+                LogPubSubCounts("UnregisterSubscription {0} NumRemoved={1}", subscriptionId, numRemoved);
+
+                if (await TryClearState())
+                {
+                    // If state was cleared expedite Deactivation
+                    DeactivateOnIdle();
+                }
+                else
+                {
+                    if (numRemoved != 0)
+                    {
+                        await WriteStateAsync();
+                    }
+                    await NotifyProducersOfRemovedSubscription(subscriptionId, streamId);
+                }
+                counterConsumersTotal.DecrementBy(numRemoved);
+            }
+            catch (Exception exc)
+            {
+                logger.Error(ErrorCode.Stream_UnregisterConsumerFailed,
+                    $"Failed to unregister a stream consumer.  Stream: {streamId}, SubscriptionId {subscriptionId}", exc);
+                // Corrupted state, deactivate grain.
+                DeactivateOnIdle();
+                throw;
+            }
         }
 
         public Task<int> ProducerCount(StreamId streamId)
@@ -271,9 +338,9 @@ namespace Orleans.Streams
             {
                 int numProducers = 0;
                 int numConsumers = 0;
-                if (State != null && State.Producers != null)
+                if (State?.Producers != null)
                     numProducers = State.Producers.Count;
-                if (State != null && State.Consumers != null)
+                if (State?.Consumers != null)
                     numConsumers = State.Consumers.Count;
                 
                 string when = args != null && args.Length != 0 ? String.Format(fmt, args) : fmt;
@@ -292,34 +359,54 @@ namespace Orleans.Streams
             
             if (captureProducers.Count != State.Producers.Count)
             {
-                throw new Exception(String.Format("State mismatch between PubSubRendezvousGrain and its persistent state. captureProducers.Count={0}, State.Producers.Count={1}",
-                    captureProducers.Count, State.Producers.Count));
+                throw new OrleansException(
+                    $"State mismatch between PubSubRendezvousGrain and its persistent state. captureProducers.Count={captureProducers.Count}, State.Producers.Count={State.Producers.Count}");
             }
 
-            foreach (var producer in captureProducers)
-                if (!State.Producers.Contains(producer))
-                    throw new Exception(String.Format("State mismatch between PubSubRendezvousGrain and its persistent state. captureProducers={0}, State.Producers={1}",
-                        Utils.EnumerableToString(captureProducers), Utils.EnumerableToString(State.Producers)));
+            if (captureProducers.Any(producer => !State.Producers.Contains(producer)))
+            {
+                throw new OrleansException(
+                    $"State mismatch between PubSubRendezvousGrain and its persistent state. captureProducers={Utils.EnumerableToString(captureProducers)}, State.Producers={Utils.EnumerableToString(State.Producers)}");
+            }
 
             if (captureConsumers.Count != State.Consumers.Count)
             {
                 LogPubSubCounts("Validate: Consumer count mismatch");
-                throw new Exception(String.Format("State mismatch between PubSubRendezvousGrain and its persistent state. captureConsumers.Count={0}, State.Consumers.Count={1}",
-                        captureConsumers.Count, State.Consumers.Count));
+                throw new OrleansException(
+                    $"State mismatch between PubSubRendezvousGrain and its persistent state. captureConsumers.Count={captureConsumers.Count}, State.Consumers.Count={State.Consumers.Count}");
             }
 
-            foreach (PubSubSubscriptionState consumer in captureConsumers)
-                if (!State.Consumers.Contains(consumer))
-                    throw new Exception(String.Format("State mismatch between PubSubRendezvousGrain and its persistent state. captureConsumers={0}, State.Consumers={1}",
-                        Utils.EnumerableToString(captureConsumers), Utils.EnumerableToString(State.Consumers)));
+            if (captureConsumers.Any(consumer => !State.Consumers.Contains(consumer)))
+            {
+                throw new OrleansException(
+                    $"State mismatch between PubSubRendezvousGrain and its persistent state. captureConsumers={Utils.EnumerableToString(captureConsumers)}, State.Consumers={Utils.EnumerableToString(State.Consumers)}");
+            }
         }
 
-        public Task<List<GuidId>> GetAllSubscriptions(StreamId streamId, IStreamConsumerExtension streamConsumer)
+        public Task<List<StreamSubscription>> GetAllSubscriptions(StreamId streamId, IStreamConsumerExtension streamConsumer)
         {
-            List<GuidId> subscriptionIds = State.Consumers.Where(c => !c.IsFaulted && c.Consumer.Equals(streamConsumer))
-                                                          .Select(c => c.SubscriptionId)
-                                                          .ToList();
-            return Task.FromResult(subscriptionIds);
+            if (streamConsumer != null)
+            {
+                var grainRef = streamConsumer as GrainReference;
+                List<StreamSubscription> subscriptions =
+                    State.Consumers.Where(c => !c.IsFaulted && c.Consumer.Equals(streamConsumer))
+                        .Select(
+                            c =>
+                                new StreamSubscription(c.SubscriptionId.Guid, streamId.ProviderName, streamId,
+                                    grainRef.GrainId)).ToList();
+                return Task.FromResult(subscriptions);
+            }
+            else
+            {
+                List<StreamSubscription> subscriptions =
+                    State.Consumers.Where(c => !c.IsFaulted)
+                        .Select(
+                            c =>
+                                new StreamSubscription(c.SubscriptionId.Guid, streamId.ProviderName, streamId,
+                                    c.consumerReference.GrainId)).ToList();
+                return Task.FromResult(subscriptions);
+            }
+
         }
 
         public async Task FaultSubscription(GuidId subscriptionId)
@@ -329,38 +416,70 @@ namespace Orleans.Streams
             {
                 return;
             }
-            pubSubState.Fault();
-            if (logger.IsVerbose) logger.Verbose("Setting subscription {0} to a faulted state.", subscriptionId.Guid);
+            try
+            {
+                pubSubState.Fault();
+                if (logger.IsVerbose) logger.Verbose("Setting subscription {0} to a faulted state.", subscriptionId.Guid);
 
-            await WriteStateAsync();
-            await NotifyProducersOfRemovedSubscription(pubSubState.SubscriptionId, pubSubState.Stream);
-            await ClearStateWhenEmpty();
+                await WriteStateAsync();
+                await NotifyProducersOfRemovedSubscription(pubSubState.SubscriptionId, pubSubState.Stream);
+            }
+            catch (Exception exc)
+            {
+                logger.Error(ErrorCode.Stream_SetSubscriptionToFaultedFailed,
+                    $"Failed to set subscription state to faulted.  SubscriptionId {subscriptionId}", exc);
+                // Corrupted state, deactivate grain.
+                DeactivateOnIdle();
+                throw;
+            }
         }
 
         private async Task NotifyProducersOfRemovedSubscription(GuidId subscriptionId, StreamId streamId)
         {
-            int numProducers = State.Producers.Count;
-            if (numProducers > 0)
+            int numProducersBeforeNotify = State.Producers.Count;
+            if (numProducersBeforeNotify > 0)
             {
-                if (logger.IsVerbose) logger.Verbose("Notifying {0} existing producers about unregistered consumer.", numProducers);
+                if (logger.IsVerbose) logger.Verbose("Notifying {0} existing producers about unregistered consumer.", numProducersBeforeNotify);
 
                 // Notify producers about unregistered consumer.
-                var tasks = new List<Task>();
-                foreach (var producerState in State.Producers.Where(producerState => IsActiveProducer(producerState.Producer)))
-                    tasks.Add(producerState.Producer.RemoveSubscriber(subscriptionId, streamId));
-
+                List<Task> tasks = State.Producers.Where(producerState => IsActiveProducer(producerState.Producer))
+                                                  .Select(producerState => NotifyProducerOfRemovedSubscriber(producerState, subscriptionId, streamId))
+                                                  .ToList();
                 await Task.WhenAll(tasks);
+                //if producers got removed
+                if (State.Producers.Count < numProducersBeforeNotify)
+                    await this.WriteStateAsync();
             }
         }
 
-        private async Task ClearStateWhenEmpty()
+        private async Task NotifyProducerOfRemovedSubscriber(PubSubPublisherState producer, GuidId subscriptionId, StreamId streamId)
+        {
+            try
+            {
+                await producer.Producer.RemoveSubscriber(subscriptionId, streamId);
+            }
+            catch (GrainExtensionNotInstalledException)
+            {
+                RemoveProducer(producer);
+            }
+            catch (ClientNotAvailableException)
+            {
+                RemoveProducer(producer);
+            }
+        }
+
+        /// <summary>
+        /// Try clear state will only clear the state if there are no producers or consumers.
+        /// </summary>
+        /// <returns></returns>
+        private async Task<bool> TryClearState()
         {
             if (State.Producers.Count == 0 && State.Consumers.Count == 0) // + we already know that numProducers == 0 from previous if-clause
             {
                 await ClearStateAsync(); //State contains no producers or consumers, remove it from storage
-                // No producers or consumers left now, so flag ourselves to expedite Deactivation
-                DeactivateOnIdle();
+                return true;
             }
+            return false;
         }
     }
 }

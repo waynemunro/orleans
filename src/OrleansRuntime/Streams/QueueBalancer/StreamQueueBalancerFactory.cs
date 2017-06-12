@@ -61,8 +61,8 @@ namespace Orleans.Streams
                 case StreamQueueBalancerType.DynamicAzureDeploymentBalancer:
                 case StreamQueueBalancerType.StaticAzureDeploymentBalancer:
                 {
-                    TraceLogger logger = TraceLogger.GetLogger(typeof(StreamQueueBalancerFactory).Name, TraceLogger.LoggerType.Runtime);
-                    var wrapper = AssemblyLoader.LoadAndCreateInstance<IDeploymentConfiguration>(Constants.ORLEANS_AZURE_UTILS_DLL, logger);
+                    Logger logger = LogManager.GetLogger(typeof(StreamQueueBalancerFactory).Name, LoggerType.Runtime);
+                    var wrapper = AssemblyLoader.LoadAndCreateInstance<IDeploymentConfiguration>(Constants.ORLEANS_AZURE_UTILS_DLL, logger, runtime.ServiceProvider);
                     isFixed = balancerType == StreamQueueBalancerType.StaticAzureDeploymentBalancer;
                     return new DeploymentBasedQueueBalancer(siloStatusOracle, wrapper, queueMapper, siloMaturityPeriod, isFixed);
                 }

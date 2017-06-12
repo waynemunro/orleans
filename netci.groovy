@@ -2,33 +2,42 @@
 
 import jobs.generation.Utilities;
 
-def project = 'dotnet/orleans'
-// Define build string
-def buildString = '''call "C:\\Program Files (x86)\\Microsoft Visual Studio 14.0\\Common7\\Tools\\VsDevCmd.bat" && Build.cmd && Test.cmd'''
+def project = GithubProject
+def branch = GithubBranchName
 
-// Generate the builds for debug and release
+[true, false].each { isPR ->
+    ['netfx', 'netstandard-win'].each { platform ->
+        ['bvt', 'functional'].each { testCategory ->
+            def newJobName = "${platform}-${testCategory}"
+            def testScript = "Test.cmd";
+            if (testCategory == 'functional') { testScript = "TestAll.cmd" }
 
-def commitJob = job(Utilities.getFullJobName(project, '', false)) {
-  label('windows')
-  steps {
-    batchFile(buildString)
-  }
+            def newJob = job(Utilities.getFullJobName(project, newJobName, isPR)) {
+                steps {
+                    batchFile("call Build.cmd ${platform} && SET OrleansDataConnectionString= && ${testScript} ${platform}")
+                }
+            }
+            
+            if (platform == 'netfx') {
+                Utilities.setMachineAffinity(newJob, 'Windows_NT', 'latest-or-auto')
+            } else {
+                // need to use a machine that has .NET 4.6.2 installed in the system
+                Utilities.setMachineAffinity(newJob, 'Windows_NT', '20161027')
+            }
+            
+            Utilities.standardJobSetup(newJob, project, isPR, "*/${branch}")
+            Utilities.addXUnitDotNETResults(newJob, '**/xUnit-Results*.xml')
+            // Archive only on commit builds.
+            if (!isPR) {
+                if (testCategory == 'bvt') {
+                    // no reason to archive for every kind of test run
+                    Utilities.addArchival(newJob, '**/Binaries/**')
+                }
+                Utilities.addGithubPushTrigger(newJob)
+            }
+            else {
+                Utilities.addGithubPRTriggerForBranch(newJob, branch, newJobName)
+            }
+        }
+    }
 }
-             
-def PRJob = job(Utilities.getFullJobName(project, '', true)) {
-  label('windows')
-  steps {
-    batchFile(buildString)
-  }
-}
-
-Utilities.addScm(commitJob, project)
-Utilities.addStandardOptions(commitJob)
-Utilities.addStandardNonPRParameters(commitJob)
-Utilities.addGithubPushTrigger(commitJob)
-Utilities.addArchival(commitJob, 'Binaries/**')
-
-Utilities.addPRTestSCM(PRJob, project)
-Utilities.addStandardOptions(PRJob)
-Utilities.addStandardPRParameters(PRJob, project)
-Utilities.addGithubPRTrigger(PRJob, 'Debug and Release')

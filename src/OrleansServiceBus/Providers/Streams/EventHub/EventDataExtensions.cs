@@ -1,17 +1,39 @@
 ﻿
+using System;
+using System.Collections.Generic;
+using System.Linq;
+#if NETSTANDARD
+using Microsoft.Azure.EventHubs;
+#else
 using Microsoft.ServiceBus.Messaging;
+#endif
+using Orleans.Serialization;
 
-namespace Orleans.ServiceBus.Providers.Streams.EventHub
+namespace Orleans.ServiceBus.Providers
 {
-    internal static class EventDataExtensions
+    /// <summary>
+    /// Extends EventData to support streaming
+    /// </summary>
+    public static class EventDataExtensions
     {
-        public const string EventDataPropertyStreamNamespaceKey = "StreamNamespace";
+        private const string EventDataPropertyStreamNamespaceKey = "StreamNamespace";
+        private static readonly string[] SkipProperties = { EventDataPropertyStreamNamespaceKey };
 
+        /// <summary>
+        /// Adds stream namespace to the EventData
+        /// </summary>
+        /// <param name="eventData"></param>
+        /// <param name="streamNamespace"></param>
         public static void SetStreamNamespaceProperty(this EventData eventData, string streamNamespace)
         {
             eventData.Properties[EventDataPropertyStreamNamespaceKey] = streamNamespace;
         }
 
+        /// <summary>
+        /// Gets stream namespace from the EventData
+        /// </summary>
+        /// <param name="eventData"></param>
+        /// <returns></returns>
         public static string GetStreamNamespaceProperty(this EventData eventData)
         {
             object namespaceObj;
@@ -20,6 +42,33 @@ namespace Orleans.ServiceBus.Providers.Streams.EventHub
                 return (string)namespaceObj;
             }
             return null;
+        }
+
+        /// <summary>
+        /// Serializes event data properties
+        /// </summary>
+        /// <param name="eventData"></param>
+        /// <param name="serializationManager"></param>
+        /// <returns></returns>
+        public static byte[] SerializeProperties(this EventData eventData, SerializationManager serializationManager)
+        {
+            var writeStream = new BinaryTokenStreamWriter();
+            serializationManager.Serialize(eventData.Properties.Where(kvp => !SkipProperties.Contains(kvp.Key)).ToList(), writeStream);
+            var result = writeStream.ToByteArray();
+            writeStream.ReleaseBuffers();
+            return result;
+        }
+
+        /// <summary>
+        /// Deserializes event data properties
+        /// </summary>
+        /// <param name="bytes"></param>
+        /// <param name="serializationManager"></param>
+        /// <returns></returns>
+        public static IDictionary<string, object> DeserializeProperties(this ArraySegment<byte> bytes, SerializationManager serializationManager)
+        {
+            var stream = new BinaryTokenStreamReader(bytes);
+            return serializationManager.Deserialize<List<KeyValuePair<string, object>>>(stream).ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
         }
     }
 }

@@ -1,21 +1,37 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Net;
+using System.Reflection;
+using System.Runtime.Serialization;
+using System.Runtime.Serialization.Formatters;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using Orleans.CodeGeneration;
 using Orleans.Runtime;
 
 namespace Orleans.Serialization
 {
-    internal class OrleansJsonSerializer : IExternalSerializer
+    using Orleans.Providers;
+    
+    public class OrleansJsonSerializer : IExternalSerializer
     {
-        private static JsonSerializerSettings settings;
-        private TraceLogger logger;
+        public const string UseFullAssemblyNamesProperty = "UseFullAssemblyNames";
+        public const string IndentJsonProperty = "IndentJSON";
+        private readonly JsonSerializerSettings settings;
+        private Logger logger;
 
-        internal static JsonSerializerSettings SerializerSettings { get { return settings; } }
-
-        static OrleansJsonSerializer()
+        public OrleansJsonSerializer(SerializationManager serializationManager, IGrainFactory grainFactory)
         {
-            settings = new JsonSerializerSettings
+            this.settings = GetDefaultSerializerSettings(serializationManager, grainFactory);
+        }
+
+        /// <summary>
+        /// Returns the default serializer settings.
+        /// </summary>
+        /// <returns>The default serializer settings.</returns>
+        public static JsonSerializerSettings GetDefaultSerializerSettings(SerializationManager serializationManager, IGrainFactory grainFactory)
+        {
+            var settings = new JsonSerializerSettings
             {
                 TypeNameHandling = TypeNameHandling.All,
                 PreserveReferencesHandling = PreserveReferencesHandling.Objects,
@@ -23,7 +39,14 @@ namespace Orleans.Serialization
                 DefaultValueHandling = DefaultValueHandling.Ignore,
                 MissingMemberHandling = MissingMemberHandling.Ignore,
                 NullValueHandling = NullValueHandling.Ignore,
-                ConstructorHandling = ConstructorHandling.AllowNonPublicDefaultConstructor
+                ConstructorHandling = ConstructorHandling.AllowNonPublicDefaultConstructor,
+#if !NETSTANDARD_TODO
+                TypeNameAssemblyFormat = FormatterAssemblyStyle.Simple,
+
+                // Types such as GrainReference need context during deserialization, so provide that context now.
+                Context = new StreamingContext(StreamingContextStates.All, new SerializationContext(serializationManager)),
+#endif
+                Formatting = Formatting.None
             };
 
             settings.Converters.Add(new IPAddressConverter());
@@ -31,90 +54,119 @@ namespace Orleans.Serialization
             settings.Converters.Add(new GrainIdConverter());
             settings.Converters.Add(new SiloAddressConverter());
             settings.Converters.Add(new UniqueKeyConverter());
-            settings.Converters.Add(new GuidJsonConverter());
+            settings.Converters.Add(new GrainReferenceConverter(grainFactory));
+
+            return settings;
         }
-        
+
         /// <summary>
-        /// Initializes the serializer
+        /// Customises the given serializer settings using provider configuration.
+        /// Can be used by any provider, allowing the users to use a standard set of configuration attributes.
         /// </summary>
-        /// <param name="logger">The logger to use to capture any serialization events</param>
-        public void Initialize(TraceLogger logger)
+        /// <param name="settings">The settings to update.</param>
+        /// <param name="config">The provider config.</param>
+        /// <returns>The updated <see cref="JsonSerializerSettings" />.</returns>
+        public static JsonSerializerSettings UpdateSerializerSettings(JsonSerializerSettings settings, IProviderConfiguration config)
+        {
+            if (config.Properties.ContainsKey(UseFullAssemblyNamesProperty))
+            {
+                bool useFullAssemblyNames;
+                if (bool.TryParse(config.Properties[UseFullAssemblyNamesProperty], out useFullAssemblyNames) && useFullAssemblyNames)
+                {
+#if !NETSTANDARD_TODO
+                    settings.TypeNameAssemblyFormat = FormatterAssemblyStyle.Full;
+#endif
+                }
+            }
+
+            if (config.Properties.ContainsKey(IndentJsonProperty))
+            {
+                bool indentJson;
+                if (bool.TryParse(config.Properties[IndentJsonProperty], out indentJson) && indentJson)
+                {
+                    settings.Formatting = Formatting.Indented;
+                }
+            }
+            return settings;
+        }
+
+        /// <inheritdoc />
+        public void Initialize(Logger logger)
         {
             this.logger = logger;
         }
 
-        /// <summary>
-        /// Informs the serialization manager whether this serializer supports the type for serialization.
-        /// </summary>
-        /// <param name="itemType">The type of the item to be serialized</param>
-        /// <returns>A value indicating whether the item can be serialized.</returns>
+        /// <inheritdoc />
         public bool IsSupportedType(Type itemType)
         {
             return true;
         }
 
-        /// <summary>
-        /// Creates a deep copy of an object
-        /// </summary>
-        /// <param name="source">The source object to be copy</param>
-        /// <returns>The copy that was created</returns>
-        public object DeepCopy(object source)
+        /// <inheritdoc />
+        public object DeepCopy(object source, ICopyContext context)
         {
             if (source == null)
             {
                 return null;
             }
 
-            var writer = new BinaryTokenStreamWriter();
-            Serialize(source, writer, source.GetType());
-            var retVal = Deserialize(source.GetType(), new BinaryTokenStreamReader(writer.ToByteArray()));
+            var serializationContext = new SerializationContext(context.SerializationManager)
+            {
+                StreamWriter = new BinaryTokenStreamWriter()
+            };
+            
+            Serialize(source, serializationContext, source.GetType());
+            var deserializationContext = new DeserializationContext(context.SerializationManager)
+            {
+                StreamReader = new BinaryTokenStreamReader(serializationContext.StreamWriter.ToBytes())
+            };
+
+            var retVal = Deserialize(source.GetType(), deserializationContext);
+            serializationContext.StreamWriter.ReleaseBuffers();
             return retVal;
         }
 
-        /// <summary>
-        /// Deserializes an object from a binary stream
-        /// </summary>
-        /// <param name="expectedType">The type that is expected to be deserialized</param>
-        /// <param name="reader">The <see cref="BinaryTokenStreamReader"/></param>
-        /// <returns>The deserialized object</returns>
-        public object Deserialize(Type expectedType, BinaryTokenStreamReader reader)
+        /// <inheritdoc />
+        public object Deserialize(Type expectedType, IDeserializationContext context)
         {
-            if (reader == null)
+            if (context == null)
             {
-                throw new ArgumentNullException("reader");
+                throw new ArgumentNullException(nameof(context));
             }
 
+            var reader = context.StreamReader;
             var str = reader.ReadString();
-            return JsonConvert.DeserializeObject(str, expectedType, settings);
+            return JsonConvert.DeserializeObject(str, expectedType, this.settings);
         }
 
         /// <summary>
         /// Serializes an object to a binary stream
         /// </summary>
         /// <param name="item">The object to serialize</param>
-        /// <param name="writer">The <see cref="BinaryTokenStreamWriter"/></param>
+        /// <param name="context">The serialization context.</param>
         /// <param name="expectedType">The type the deserializer should expect</param>
-        public void Serialize(object item, BinaryTokenStreamWriter writer, Type expectedType)
+        public void Serialize(object item, ISerializationContext context, Type expectedType)
         {
-            if (writer == null)
+            if (context == null)
             {
-                throw new ArgumentNullException("writer");
+                throw new ArgumentNullException(nameof(context));
             }
 
+            var writer = context.StreamWriter;
             if (item == null)
             {
                 writer.WriteNull();
                 return;
             }
 
-            var str = JsonConvert.SerializeObject(item, expectedType, settings);
+            var str = JsonConvert.SerializeObject(item, expectedType, this.settings);
             writer.Write(str);
         }
     }
 
-    #region JsonConverters
+#region JsonConverters
 
-    class IPAddressConverter : JsonConverter
+    internal class IPAddressConverter : JsonConverter
     {
         public override bool CanConvert(Type objectType)
         {
@@ -134,7 +186,7 @@ namespace Orleans.Serialization
         }
     }
 
-    class GrainIdConverter : JsonConverter
+    internal class GrainIdConverter : JsonConverter
     {
         public override bool CanConvert(Type objectType)
         {
@@ -158,7 +210,7 @@ namespace Orleans.Serialization
         }
     }
 
-    class SiloAddressConverter : JsonConverter
+    internal class SiloAddressConverter : JsonConverter
     {
         public override bool CanConvert(Type objectType)
         {
@@ -182,7 +234,7 @@ namespace Orleans.Serialization
         }
     }
 
-    class UniqueKeyConverter : JsonConverter
+    internal class UniqueKeyConverter : JsonConverter
     {
         public override bool CanConvert(Type objectType)
         {
@@ -205,8 +257,8 @@ namespace Orleans.Serialization
             return addr;
         }
     }
- 
-    class IPEndPointConverter : JsonConverter
+
+    internal class IPEndPointConverter : JsonConverter
     {
         public override bool CanConvert(Type objectType)
         {
@@ -233,91 +285,61 @@ namespace Orleans.Serialization
         }
     }
 
-    /// <summary>
-    ///     JSON converter for <see cref="Guid"/>.
-    /// </summary>
-    class GuidJsonConverter : JsonConverter
+    internal class GrainReferenceConverter : JsonConverter
     {
-        /// <summary>
-        ///     Gets a value indicating whether this <see cref="T:Newtonsoft.Json.JsonConverter"/> can read JSON.
-        /// </summary>
-        /// <value><see langword="true"/> if this <see cref="T:Newtonsoft.Json.JsonConverter"/> can read JSON; otherwise, <see langword="false"/>.
-        /// </value>
-        public override bool CanRead { get { return true; } }
+        private static readonly Type AddressableType = typeof(IAddressable);
+        private readonly IGrainFactory grainFactory;
+        private readonly JsonSerializer internalSerializer;
 
-        /// <summary>
-        ///     Gets a value indicating whether this <see cref="T:Newtonsoft.Json.JsonConverter"/> can write JSON.
-        /// </summary>
-        /// <value><see langword="true"/> if this <see cref="T:Newtonsoft.Json.JsonConverter"/> can write JSON; otherwise, <see langword="false"/>.
-        /// </value>
-        public override bool CanWrite { get { return true; } }
+        public GrainReferenceConverter(IGrainFactory grainFactory)
+        {
+            this.grainFactory = grainFactory;
 
-        /// <summary>
-        /// Determines whether this instance can convert the specified object type.
-        /// </summary>
-        /// <param name="objectType">
-        /// Kind of the object.
-        /// </param>
-        /// <returns>
-        /// <see langword="true"/> if this instance can convert the specified object type; otherwise,
-        /// .
-        /// </returns>
+            // Create a serializer for internal serialization which does not have a specified GrainReference serializer.
+            // This internal serializer will use GrainReference's ISerializable implementation for serialization and deserialization.
+            this.internalSerializer = JsonSerializer.Create(new JsonSerializerSettings
+            {
+                TypeNameHandling = TypeNameHandling.All,
+                PreserveReferencesHandling = PreserveReferencesHandling.None,
+                DateFormatHandling = DateFormatHandling.IsoDateFormat,
+                DefaultValueHandling = DefaultValueHandling.Ignore,
+                MissingMemberHandling = MissingMemberHandling.Ignore,
+                NullValueHandling = NullValueHandling.Ignore,
+                ConstructorHandling = ConstructorHandling.AllowNonPublicDefaultConstructor,
+                Formatting = Formatting.None,
+                Converters =
+                {
+                    new IPAddressConverter(),
+                    new IPEndPointConverter(),
+                    new GrainIdConverter(),
+                    new SiloAddressConverter(),
+                    new UniqueKeyConverter()
+                }
+            });
+        }
+
         public override bool CanConvert(Type objectType)
         {
-            return objectType.IsAssignableFrom(typeof(Guid)) || objectType.IsAssignableFrom(typeof(Guid?));
+            return AddressableType.IsAssignableFrom(objectType);
         }
 
-        /// <summary>
-        /// Writes the JSON representation of the object.
-        /// </summary>
-        /// <param name="writer">
-        /// The <see cref="T:Newtonsoft.Json.JsonWriter"/> to write to.
-        /// </param>
-        /// <param name="value">
-        /// The value.
-        /// </param>
-        /// <param name="serializer">
-        /// The calling serializer.
-        /// </param>
         public override void WriteJson(JsonWriter writer, object value, JsonSerializer serializer)
         {
-            if (value == null)
-            {
-                writer.WriteValue(default(string));
-            }
-            else if (value is Guid)
-            {
-                var guid = (Guid)value;
-                writer.WriteValue(guid.ToString("N"));
-            }
+            // Serialize the grain reference using the internal serializer.
+            this.internalSerializer.Serialize(writer, value);
         }
 
-        /// <summary>
-        /// Reads the JSON representation of the object.
-        /// </summary>
-        /// <param name="reader">
-        /// The <see cref="T:Newtonsoft.Json.JsonReader"/> to read from.
-        /// </param>
-        /// <param name="objectType">
-        /// Kind of the object.
-        /// </param>
-        /// <param name="existingValue">
-        /// The existing value of object being read.
-        /// </param>
-        /// <param name="serializer">
-        /// The calling serializer.
-        /// </param>
-        /// <returns>
-        /// The object value.
-        /// </returns>
-        public override object ReadJson(
-            JsonReader reader,
-            Type objectType,
-            object existingValue,
-            JsonSerializer serializer)
+        public override object ReadJson(JsonReader reader, Type objectType, object existingValue, JsonSerializer serializer)
         {
-            var str = reader.Value as string;
-            return str != null ? Guid.Parse(str) : default(Guid);
+            // Deserialize using the internal serializer which will use the concrete GrainReference implementation's
+            // ISerializable constructor.
+            var result = this.internalSerializer.Deserialize(reader, objectType);
+            var grainRef = result as IAddressable;
+            if (grainRef == null) return result;
+
+            // Bind the deserialized grain reference to the runtime.
+            this.grainFactory.BindGrainReference(grainRef);
+            return grainRef;
         }
     }
 

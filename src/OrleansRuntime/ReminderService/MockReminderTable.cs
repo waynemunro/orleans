@@ -14,9 +14,9 @@ namespace Orleans.Runtime.ReminderService
             this.delay = delay;
         }
 
-        public Task Init(GlobalConfiguration config,TraceLogger logger)
+        public Task Init(GlobalConfiguration config, Logger logger)
         {
-            return TaskDone.Done;
+            return Task.CompletedTask;
         }
 
         public async Task<ReminderTableData> ReadRows(GrainReference key)
