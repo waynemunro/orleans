@@ -1,6 +1,6 @@
 ﻿
 using System;
-using Orleans.ServiceBus.Providers;
+using Orleans.Providers.Streams.Common;
 using Xunit;
 
 namespace ServiceBus.Tests.StreamingTests
@@ -23,7 +23,7 @@ namespace ServiceBus.Tests.StreamingTests
             DateTime timeRead = NowUtc - MinTimeInCache;
             TimeSpan timeInCache = NowUtc - timeRead;
             TimeSpan relativeAge = CacheMaxEnqueTime - messageEnqueTime;
-            Assert.Equal(false, TimePurge.ShouldPurgFromTime(timeInCache, relativeAge));
+            Assert.False(TimePurge.ShouldPurgFromTime(timeInCache, relativeAge));
         }
 
         /// <summary>
@@ -36,7 +36,7 @@ namespace ServiceBus.Tests.StreamingTests
             DateTime timeRead = NowUtc - MinTimeInCache - TimeSpan.FromTicks(1);
             TimeSpan timeInCache = NowUtc - timeRead;
             TimeSpan relativeAge = CacheMaxEnqueTime - messageEnqueTime;
-            Assert.Equal(true, TimePurge.ShouldPurgFromTime(timeInCache, relativeAge));
+            Assert.True(TimePurge.ShouldPurgFromTime(timeInCache, relativeAge));
         }
 
         /// <summary>
@@ -49,7 +49,7 @@ namespace ServiceBus.Tests.StreamingTests
             DateTime timeRead = NowUtc - MinTimeInCache - TimeSpan.FromTicks(1);
             TimeSpan timeInCache = NowUtc - timeRead;
             TimeSpan relativeAge = CacheMaxEnqueTime - messageEnqueTime;
-            Assert.Equal(false, TimePurge.ShouldPurgFromTime(timeInCache, relativeAge));
+            Assert.False(TimePurge.ShouldPurgFromTime(timeInCache, relativeAge));
         }
 
         /// <summary>
@@ -62,16 +62,7 @@ namespace ServiceBus.Tests.StreamingTests
             DateTime timeRead = NowUtc - MinTimeInCache;
             TimeSpan timeInCache = NowUtc - timeRead;
             TimeSpan relativeAge = CacheMaxEnqueTime - messageEnqueTime;
-            Assert.Equal(false, TimePurge.ShouldPurgFromTime(timeInCache, relativeAge));
-        }
-
-        /// <summary>
-        /// Default time purge should not purge
-        /// </summary>
-        [Fact, TestCategory("BVT"), TestCategory("Streaming")]
-        public void TimePurgePredicate_DefaultNeverPurges_Tests()
-        {
-            Assert.Equal(false, TimePurgePredicate.Default.ShouldPurgFromTime(TimeSpan.Zero, TimeSpan.MaxValue));
+            Assert.False(TimePurge.ShouldPurgFromTime(timeInCache, relativeAge));
         }
     }
 }

@@ -1,5 +1,4 @@
-﻿#if !NETSTANDARD_TODO
-using Orleans;
+﻿using Orleans;
 using Orleans.Runtime;
 using Orleans.Runtime.TestHooks;
 using Orleans.TestingHost;
@@ -213,7 +212,7 @@ namespace AWSUtils.Tests.StorageTests
             Assert.Equal(0, val1);  // "Initial value - 1"
 
             string val2 = await grain2.GetValue();
-            Assert.Equal(null, val2);  // "Initial value - 2"
+            Assert.Null(val2);  // "Initial value - 2"
 
             double val3 = await grain3.GetValue();
             Assert.Equal(0.0, val3);  // "Initial value - 3"
@@ -440,5 +439,3 @@ namespace AWSUtils.Tests.StorageTests
         #endregion
     }
 }
-
-#endif

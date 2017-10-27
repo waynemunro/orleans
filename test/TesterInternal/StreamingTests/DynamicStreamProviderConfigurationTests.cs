@@ -56,7 +56,7 @@ namespace UnitTests.StreamingTests
                 GeneratorConfig.WriteProperties(DefaultStreamProviderSettings);
 
                 // add queue balancer setting
-                DefaultStreamProviderSettings.Add(PersistentStreamProviderConfig.QUEUE_BALANCER_TYPE, StreamQueueBalancerType.DynamicClusterConfigDeploymentBalancer.ToString());
+                DefaultStreamProviderSettings.Add(PersistentStreamProviderConfig.QUEUE_BALANCER_TYPE, StreamQueueBalancerType.DynamicClusterConfigDeploymentBalancer.AssemblyQualifiedName);
 
                 // add pub/sub settting
                 DefaultStreamProviderSettings.Add(PersistentStreamProviderConfig.STREAM_PUBSUB_TYPE, StreamPubSubType.ImplicitOnly.ToString());
@@ -81,7 +81,7 @@ namespace UnitTests.StreamingTests
         {
             //Making sure the initial provider list is empty.
             List<string> providerNames = (await this.GetPrimarySiloTestHooks().GetStreamProviderNames()).ToList();
-            Assert.Equal(0, providerNames.Count);
+            Assert.Empty(providerNames);
 
             providerNames = new List<string>(new [] { GeneratedStreamTestConstants.StreamProviderName });
             var reporter = this.fixture.GrainFactory.GetGrain<IGeneratedEventReporterGrain>(GeneratedStreamTestConstants.ReporterId);

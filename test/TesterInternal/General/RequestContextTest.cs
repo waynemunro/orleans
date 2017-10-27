@@ -29,10 +29,8 @@ namespace UnitTests.General
             protected override TestCluster CreateTestCluster()
             {
                 var options = new TestClusterOptions(initialSilosCount: 1);
-
                 options.ClusterConfiguration.ApplyToAllNodes(n => n.PropagateActivityId = true);
                 options.ClientConfiguration.PropagateActivityId = true;
-
                 return new TestCluster(options);
             }
         }
@@ -65,7 +63,6 @@ namespace UnitTests.General
             Assert.Equal(activityId,  result);  // "E2E ActivityId not propagated correctly"
         }
 
-#if !NETSTANDARD
         [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("RequestContext")]
         public async Task RequestContext_LegacyActivityId_Simple()
         {
@@ -73,10 +70,10 @@ namespace UnitTests.General
             IRequestContextTestGrain grain = this.fixture.GrainFactory.GetGrain<IRequestContextTestGrain>(GetRandomGrainId());
 
             Trace.CorrelationManager.ActivityId = activityId;
+            Assert.True(RequestContext.PropagateActivityId); // "Verify activityId propagation is enabled."
             Guid result = await grain.E2ELegacyActivityId();
             Assert.Equal(activityId, result);  // "E2E ActivityId not propagated correctly"
         }
-#endif
 
         [Fact, TestCategory("Functional"), TestCategory("RequestContext")]
         public async Task RequestContext_AC_Test1()
@@ -176,7 +173,6 @@ namespace UnitTests.General
             RequestContext.Clear();
         }
 
-#if !NETSTANDARD
         [Fact, TestCategory("Functional"), TestCategory("RequestContext")]
         public async Task RequestContext_ActivityId_CM_E2E()
         {
@@ -238,7 +234,6 @@ namespace UnitTests.General
             Assert.Equal(activityId2,  result);  // "E2E ActivityId 2 not propagated correctly"
             RequestContext.Clear();
         }
-#endif
 
         [Fact, TestCategory("Functional"), TestCategory("RequestContext")]
         public async Task RequestContext_ActivityId_RC_None_E2E()
@@ -258,11 +253,11 @@ namespace UnitTests.General
 
             result = await grain.E2EActivityId();
             Assert.Equal(nullActivityId,  result);  // "E2E ActivityId 2 should not exist"
-            Assert.Equal(null,  RequestContext.Get(RequestContext.E2_E_TRACING_ACTIVITY_ID_HEADER));  // "No ActivityId context should be set"
+            Assert.Null(RequestContext.Get(RequestContext.E2_E_TRACING_ACTIVITY_ID_HEADER));  // "No ActivityId context should be set"
 
             for (int i = 0; i < Environment.ProcessorCount; i++)
             {
-                Assert.Equal(null,  RequestContext.Get(RequestContext.E2_E_TRACING_ACTIVITY_ID_HEADER));  // "No ActivityId context should be set"
+                Assert.Null(RequestContext.Get(RequestContext.E2_E_TRACING_ACTIVITY_ID_HEADER));  // "No ActivityId context should be set"
 
                 result = await grain.E2EActivityId();
 
@@ -303,7 +298,6 @@ namespace UnitTests.General
             RequestContext.Clear();
         }
 
-#if !NETSTANDARD
         [Fact, TestCategory("Functional"), TestCategory("RequestContext")]
         public async Task RequestContext_ActivityId_CM_DynamicChange_Client()
         {
@@ -382,7 +376,6 @@ namespace UnitTests.General
             Assert.Equal(activityId,  result);  // "E2E ActivityId #1 not propagated correctly after #2"
             RequestContext.Clear();
         }
-#endif
 
         [Fact, TestCategory("Functional"), TestCategory("RequestContext")]
         public async Task ClientInvokeCallback_CountCallbacks()
@@ -457,10 +450,7 @@ namespace UnitTests.General
         public void StateChanged(int a, int b)
         {
             output.WriteLine("RequestContextGrainObserver.StateChanged a={0} b={1}", a, b);
-            if (action != null)
-            {
-                action(a, b, result);
-            }
+            this.action?.Invoke(a, b, this.result);
         }
     }
 

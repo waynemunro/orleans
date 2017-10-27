@@ -6,6 +6,7 @@ using Orleans.TestingHost;
 using Tester;
 using TestExtensions;
 using Xunit;
+using Orleans.Logging;
 
 namespace UnitTests
 {
@@ -63,12 +64,11 @@ namespace UnitTests
         public void ClientInit_ErrorDuringInitialize()
         {
             ClientConfiguration cfg = TestClusterOptions.BuildClientConfiguration(HostedCluster.ClusterConfiguration);
-            cfg.TraceFileName = "TestOnlyThrowExceptionDuringInit.log";
 
             // First initialize will have been done by orleans unit test base class, so uninitialize back to null state
             GrainClient.Uninitialize();
+            GrainClient.ConfigureLoggingDelegate = builder => builder.AddFile("TestOnlyThrowExceptionDuringInit.log");
             Assert.False(GrainClient.IsInitialized, "GrainClient.IsInitialized");
-            Assert.False(LogManager.IsInitialized, "Logger.IsInitialized");
 
             try
             {
@@ -77,13 +77,11 @@ namespace UnitTests
                     GrainClient.Initialize(cfg));
 
                 Assert.False(GrainClient.IsInitialized, "GrainClient.IsInitialized");
-                Assert.False(LogManager.IsInitialized, "Logger.IsInitialized");
 
                 OutsideRuntimeClient.TestOnlyThrowExceptionDuringInit = false;
 
                 GrainClient.Initialize(cfg);
                 Assert.True(GrainClient.IsInitialized, "GrainClient.IsInitialized");
-                Assert.True(LogManager.IsInitialized, "Logger.IsInitialized");
             }
             finally
             {

@@ -124,7 +124,7 @@ namespace UnitTests.StorageTests
             object[] replies = await mgmtGrain.SendControlCommandToProvider(typeof(MockStorageProvider).FullName,
                MockStorageProviderName1, (int)MockStorageProvider.Commands.InitCount, null);
 
-            Assert.True(replies.Contains(1)); // StorageProvider #Init
+            Assert.Contains(1, replies); // StorageProvider #Init
         }
 
         [Fact, TestCategory("Functional"), TestCategory("Persistence")]
@@ -179,7 +179,7 @@ namespace UnitTests.StorageTests
 
             SetErrorInjection(providerName, ErrorInjectionPoint.BeforeRead);
 
-            await Assert.ThrowsAsync<OrleansException>(() =>
+            await Assert.ThrowsAsync<StorageProviderInjectedError>(() =>
                 grain.GetValue());
         }
 
@@ -360,7 +360,7 @@ namespace UnitTests.StorageTests
             await grain.DoDelete();
             providerState = GetStateForStorageProviderInUse(providerName, typeof(MockStorageProvider).FullName);
             Assert.Equal(initialDeleteCount + 1, providerState.ProviderStateForTest.DeleteCount); // StorageProvider #Deletes
-            Assert.Equal(null, providerState.LastStoredGrainState); // Store-AfterDelete-Empty
+            Assert.Null(providerState.LastStoredGrainState); // Store-AfterDelete-Empty
 
             int val = await grain.GetValue(); // Returns current in-memory null data without re-read.
             providerState = GetStateForStorageProviderInUse(providerName, typeof(MockStorageProvider).FullName); // update state
@@ -735,6 +735,36 @@ namespace UnitTests.StorageTests
             Assert.Equal(expectedVal, val);
         }
 
+        /// <summary>
+        /// Tests that deactivations caused by an <see cref="InconsistentStateException"/> only affect the grain which
+        /// the exception originated from.
+        /// </summary>
+        /// <returns></returns>
+        [Fact, TestCategory("Functional"), TestCategory("Persistence")]
+        public async Task Persistence_Provider_InconsistentStateException_DeactivatesOnlyCurrentGrain()
+        {
+            var target = this.HostedCluster.GrainFactory.GetGrain<IPersistenceProviderErrorGrain>(Guid.NewGuid());
+            var proxy = this.HostedCluster.GrainFactory.GetGrain<IPersistenceProviderErrorProxyGrain>(Guid.NewGuid());
+            
+            // Record the original activation ids.
+            var targetActivationId = await target.GetActivationId();
+            var proxyActivationId = await proxy.GetActivationId();
+
+            // Cause an inconsistent state exception.
+            this.SetErrorInjection(ErrorInjectorProviderName, new ErrorInjectionBehavior
+            {
+                ErrorInjectionPoint = ErrorInjectionPoint.BeforeWrite,
+                ExceptionType = typeof(InconsistentStateException)
+            });
+            this.CheckStorageProviderErrors(() => proxy.DoWrite(63, target), typeof(InconsistentStateException));
+
+            // The target should have been deactivated by the exception.
+            Assert.NotEqual(targetActivationId, await target.GetActivationId());
+
+            // The grain which called the target grain should not have been deactivated.
+            Assert.Equal(proxyActivationId, await proxy.GetActivationId());
+        }
+
         [Fact, TestCategory("Functional"), TestCategory("Persistence")]
         public async Task Persistence_Provider_Error_AfterWrite()
         {
@@ -957,8 +987,7 @@ namespace UnitTests.StorageTests
         public async Task Persistence_Grain_BadProvider()
         {
             IBadProviderTestGrain grain = this.HostedCluster.GrainFactory.GetGrain<IBadProviderTestGrain>(Guid.NewGuid());
-            var oex = await Assert.ThrowsAsync<OrleansException>(() => grain.DoSomething());
-            Assert.IsAssignableFrom<BadProviderConfigException>(oex.InnerException);
+            var oex = await Assert.ThrowsAsync<BadProviderConfigException>(() => grain.DoSomething());
         }
 
         [Fact, TestCategory("Functional"), TestCategory("Persistence")]
@@ -1161,12 +1190,14 @@ namespace UnitTests.StorageTests
         {
             IManagementGrain mgmtGrain = this.HostedCluster.GrainFactory.GetGrain<IManagementGrain>(0);
             // set up SetVal func args
-            var args = new MockStorageProvider.SetValueArgs();
-            args.Val = newValue;
-            args.Name = "Field1";
-            args.GrainType = grainType;
-            args.GrainReference = (GrainReference)grain;
-            args.StateType = typeof(PersistenceTestGrainState);
+            var args = new MockStorageProvider.SetValueArgs
+            {
+                Val = newValue,
+                Name = "Field1",
+                GrainType = grainType,
+                GrainReference = (GrainReference) grain,
+                StateType = typeof(PersistenceTestGrainState)
+            };
             mgmtGrain.SendControlCommandToProvider(providerTypeFullName,
                 providerName, (int)MockStorageProvider.Commands.SetValue, args).Wait();
         }

@@ -1,5 +1,7 @@
 using System;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Orleans.Runtime;
 using Orleans.Streams;
 
@@ -11,19 +13,19 @@ namespace Orleans.Providers.Streams.AzureQueue
         private string dataConnectionString;
         private string queueName;
         private string providerName;
-
+        private ILoggerFactory loggerFactory;
         /// <summary>"QueueName".</summary>
         public const string QUEUE_NAME_STRING = "QueueName";
 
         /// <summary> Init the factory.</summary>
-        public virtual void Init(IProviderConfiguration config, string providerName, Logger logger, IServiceProvider serviceProvider)
+        public virtual void Init(IProviderConfiguration config, string providerName, IServiceProvider serviceProvider)
         {
             if (config == null) throw new ArgumentNullException("config");
             if (!config.Properties.TryGetValue(AzureQueueAdapterConstants.DataConnectionStringPropertyName, out dataConnectionString))
                 throw new ArgumentException(String.Format("{0} property not set", AzureQueueAdapterConstants.DataConnectionStringPropertyName));
             if (!config.Properties.TryGetValue(QUEUE_NAME_STRING, out queueName))
                 throw new ArgumentException(String.Format("{0} property not set", QUEUE_NAME_STRING));
-
+            this.loggerFactory = serviceProvider.GetRequiredService<ILoggerFactory>();
             this.providerName = providerName;
         }
 
@@ -31,7 +33,7 @@ namespace Orleans.Providers.Streams.AzureQueue
         /// <summary>Creates the Simple Azure Queue based adapter.</summary>
         public virtual Task<IQueueAdapter> CreateAdapter()
         {
-            var adapter = new SimpleAzureQueueAdapter(dataConnectionString, providerName, queueName);
+            var adapter = new SimpleAzureQueueAdapter(this.loggerFactory, dataConnectionString, providerName, queueName);
             return Task.FromResult<IQueueAdapter>(adapter);
         }
 

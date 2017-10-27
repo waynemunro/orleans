@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.WindowsAzure.Storage.Queue;
 using Microsoft.WindowsAzure.Storage.RetryPolicies;
 using Orleans.Runtime;
@@ -49,7 +50,7 @@ namespace Orleans.AzureUtils
 
         private string connectionString { get; set; }
         [System.Diagnostics.CodeAnalysis.SuppressMessage("Microsoft.Security", "CA2104:DoNotDeclareReadOnlyMutableReferenceTypes")]
-        private readonly Logger logger;
+        private readonly ILogger logger;
         private readonly TimeSpan? messageVisibilityTimeout;
         private readonly CloudQueueClient queueOperationsClient;
         private CloudQueue queue;
@@ -57,14 +58,15 @@ namespace Orleans.AzureUtils
         /// <summary>
         /// Constructor.
         /// </summary>
+        /// <param name="loggerFactory">logger factory to use</param>
         /// <param name="queueName">Name of the queue to be connected to.</param>
         /// <param name="storageConnectionString">Connection string for the Azure storage account used to host this table.</param>
         /// <param name="visibilityTimeout">A TimeSpan specifying the visibility timeout interval</param>
-        public AzureQueueDataManager(string queueName, string storageConnectionString, TimeSpan? visibilityTimeout = null)
+        public AzureQueueDataManager(ILoggerFactory loggerFactory, string queueName, string storageConnectionString, TimeSpan? visibilityTimeout = null)
         {
             AzureStorageUtils.ValidateQueueName(queueName);
 
-            logger = LogManager.GetLogger(this.GetType().Name, LoggerType.Runtime);
+            logger = loggerFactory.CreateLogger<AzureQueueDataManager>();
             QueueName = queueName;
             connectionString = storageConnectionString;
             messageVisibilityTimeout = visibilityTimeout;
@@ -83,11 +85,12 @@ namespace Orleans.AzureUtils
         /// <param name="deploymentId">The deployment id of the Azure service hosting this silo. It will be concatenated to the queueName.</param>
         /// <param name="storageConnectionString">Connection string for the Azure storage account used to host this table.</param>
         /// <param name="visibilityTimeout">A TimeSpan specifying the visibility timeout interval</param>
-        public AzureQueueDataManager(string queueName, string deploymentId, string storageConnectionString, TimeSpan? visibilityTimeout = null)
+        /// <param name="loggerFactory">logger factory used to create loggers</param>
+        public AzureQueueDataManager(ILoggerFactory loggerFactory, string queueName, string deploymentId, string storageConnectionString, TimeSpan? visibilityTimeout = null)
         {
             AzureStorageUtils.ValidateQueueName(queueName);
             
-            logger = LogManager.GetLogger(this.GetType().Name, LoggerType.Runtime);
+            logger = loggerFactory.CreateLogger<AzureQueueDataManager>();
             QueueName = deploymentId + "-" + queueName;
             AzureStorageUtils.ValidateQueueName(QueueName);
             connectionString = storageConnectionString;
@@ -134,7 +137,7 @@ namespace Orleans.AzureUtils
         public async Task DeleteQueue()
         {
             var startTime = DateTime.UtcNow;
-            if (logger.IsVerbose2) logger.Verbose2("Deleting queue: {0}", QueueName);
+            if (logger.IsEnabled(LogLevel.Trace)) logger.Trace("Deleting queue: {0}", QueueName);
             try
             {
                 // that way we don't have first to create the queue to be able later to delete it.
@@ -160,7 +163,7 @@ namespace Orleans.AzureUtils
         public async Task ClearQueue()
         {
             var startTime = DateTime.UtcNow;
-            if (logger.IsVerbose2) logger.Verbose2("Clearing a queue: {0}", QueueName);
+            if (logger.IsEnabled(LogLevel.Trace)) logger.Trace("Clearing a queue: {0}", QueueName);
             try
             {
                 // that way we don't have first to create the queue to be able later to delete it.
@@ -185,7 +188,7 @@ namespace Orleans.AzureUtils
         public async Task AddQueueMessage(CloudQueueMessage message)
         {
             var startTime = DateTime.UtcNow;
-            if (logger.IsVerbose2) logger.Verbose2("Adding message {0} to queue: {1}", message, QueueName);
+            if (logger.IsEnabled(LogLevel.Trace)) logger.Trace("Adding message {0} to queue: {1}", message, QueueName);
             try
             {
                 await queue.AddMessageAsync(message);
@@ -206,7 +209,7 @@ namespace Orleans.AzureUtils
         public async Task<CloudQueueMessage> PeekQueueMessage()
         {
             var startTime = DateTime.UtcNow;
-            if (logger.IsVerbose2) logger.Verbose2("Peeking a message from queue: {0}", QueueName);
+            if (logger.IsEnabled(LogLevel.Trace)) logger.Trace("Peeking a message from queue: {0}", QueueName);
             try
             {
                 return await queue.PeekMessageAsync();
@@ -230,7 +233,7 @@ namespace Orleans.AzureUtils
         public async Task<CloudQueueMessage> GetQueueMessage()
         {
             var startTime = DateTime.UtcNow;
-            if (logger.IsVerbose2) logger.Verbose2("Getting a message from queue: {0}", QueueName);
+            if (logger.IsEnabled(LogLevel.Trace)) logger.Trace("Getting a message from queue: {0}", QueueName);
             try
             {
                 //BeginGetMessage and EndGetMessage is not supported in netstandard, may be use GetMessageAsync
@@ -260,7 +263,7 @@ namespace Orleans.AzureUtils
             {
                 count = CloudQueueMessage.MaxNumberOfMessagesToPeek;
             }
-            if (logger.IsVerbose2) logger.Verbose2("Getting up to {0} messages from queue: {1}", count, QueueName);
+            if (logger.IsEnabled(LogLevel.Trace)) logger.Trace("Getting up to {0} messages from queue: {1}", count, QueueName);
             try
             {
                 return await queue.GetMessagesAsync(count, messageVisibilityTimeout, options: null, operationContext: null);
@@ -283,7 +286,7 @@ namespace Orleans.AzureUtils
         public async Task DeleteQueueMessage(CloudQueueMessage message)
         {
             var startTime = DateTime.UtcNow;
-            if (logger.IsVerbose2) logger.Verbose2("Deleting a message from queue: {0}", QueueName);
+            if (logger.IsEnabled(LogLevel.Trace)) logger.Trace("Deleting a message from queue: {0}", QueueName);
             try
             {
                 await queue.DeleteMessageAsync(message.Id, message.PopReceipt);
@@ -311,7 +314,7 @@ namespace Orleans.AzureUtils
         public async Task<int> GetApproximateMessageCount()
         {
             var startTime = DateTime.UtcNow;
-            if (logger.IsVerbose2) logger.Verbose2("GetApproximateMessageCount a message from queue: {0}", QueueName);
+            if (logger.IsEnabled(LogLevel.Trace)) logger.Trace("GetApproximateMessageCount a message from queue: {0}", QueueName);
             try
             {
                 await queue.FetchAttributesAsync();

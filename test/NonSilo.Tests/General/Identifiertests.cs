@@ -29,10 +29,48 @@ namespace UnitTests.General
             this.environment = fixture;
         }
 
+        [Fact, TestCategory("BVT"), TestCategory("Identifiers")]
+        public void UniqueKeyToByteArray()
+        {
+            var key = UniqueKey.NewKey(Guid.NewGuid(), category: UniqueKey.Category.KeyExtGrain, keyExt: "hello world");
+
+            var result = key.ToByteArray();
+
+            var sw = new BinaryTokenStreamWriter();
+            sw.Write(key);
+            var expected = sw.ToByteArray();
+
+            Assert.Equal(expected.Length, result.Length);
+            for (int i = 0; i < expected.Length; i++)
+            {
+                Assert.Equal(expected[i], result[i]);
+            }
+        }
+
+        [Fact, TestCategory("BVT"), TestCategory("Identifiers")]
+        public void SiloAddressGetUniformHashCodes()
+        {
+            int numberofHash = 3;
+            var siloAddress = SiloAddress.New(new IPEndPoint(IPAddress.Loopback, 8080), 26);
+
+            var result = siloAddress.GetUniformHashCodes(numberofHash);
+
+            for (int i = 0; i < numberofHash; i++)
+            {
+                var sw = new BinaryTokenStreamWriter();
+                sw.Write(siloAddress);
+                sw.Write(i);
+                var tmp = sw.ToByteArray();
+                var expected = JenkinsHash.ComputeHash(sw.ToByteArray());
+
+                Assert.Equal(expected, result[i]);
+            }
+        }
+
         [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("Identifiers")]
         public void ID_IsSystem()
         {
-            GrainId testGrain = Constants.DirectoryServiceId;
+            GrainId testGrain = Orleans.Runtime.Constants.DirectoryServiceId;
             output.WriteLine("Testing GrainID " + testGrain);
             Assert.True(testGrain.IsSystemTarget); // System grain ID is not flagged as a system ID
 
@@ -388,7 +426,7 @@ namespace UnitTests.General
         [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("Identifiers")]
         public void SiloAddress_ToFrom_ParsableString()
         {
-            SiloAddress address1 = SiloAddress.NewLocalAddress(12345);
+            SiloAddress address1 = SiloAddressUtils.NewLocalSiloAddress(12345);
 
             string addressStr1 = address1.ToParsableString();
             SiloAddress addressObj1 = SiloAddress.FromParsableString(addressStr1);
@@ -430,17 +468,17 @@ namespace UnitTests.General
             TestGrainReference(grainRef);
 
             GrainId systemTragetGrainId = GrainId.NewSystemTargetGrainIdByTypeCode(2);
-            grainRef = GrainReference.FromGrainId(systemTragetGrainId, null, null, SiloAddress.NewLocalAddress(1));
+            grainRef = GrainReference.FromGrainId(systemTragetGrainId, null, null, SiloAddressUtils.NewLocalSiloAddress(1));
             this.environment.GrainFactory.BindGrainReference(grainRef);
             TestGrainReference(grainRef);
 
             GrainId observerGrainId = GrainId.NewClientId();
-            grainRef = GrainReference.NewObserverGrainReference(observerGrainId, GuidId.GetNewGuidId(), this.environment.RuntimeClient);
+            grainRef = GrainReference.NewObserverGrainReference(observerGrainId, GuidId.GetNewGuidId(), this.environment.RuntimeClient.GrainReferenceRuntime);
             this.environment.GrainFactory.BindGrainReference(grainRef);
             TestGrainReference(grainRef);
 
             GrainId geoObserverGrainId = GrainId.NewClientId("clusterid");
-            grainRef = GrainReference.NewObserverGrainReference(geoObserverGrainId, GuidId.GetNewGuidId(), this.environment.RuntimeClient);
+            grainRef = GrainReference.NewObserverGrainReference(geoObserverGrainId, GuidId.GetNewGuidId(), this.environment.RuntimeClient.GrainReferenceRuntime);
             this.environment.GrainFactory.BindGrainReference(grainRef);
             TestGrainReference(grainRef);
         }

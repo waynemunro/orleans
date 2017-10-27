@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using AWSUtils.Tests.StorageTests;
+using Microsoft.Extensions.Logging.Abstractions;
 using TestExtensions;
 using Xunit;
 using Xunit.Abstractions;
@@ -34,6 +35,11 @@ namespace AWSUtils.Tests.Streaming
 
         public SQSAdapterTests(ITestOutputHelper output, TestEnvironmentFixture fixture)
         {
+            if (!AWSTestConstants.IsSqsAvailable)
+            {
+                throw new SkipException("Empty connection string");
+            }
+
             this.output = output;
             this.fixture = fixture;
             this.deploymentId = MakeDeploymentId();
@@ -41,10 +47,10 @@ namespace AWSUtils.Tests.Streaming
 
         public void Dispose()
         {
-            SQSStreamProviderUtils.DeleteAllUsedQueues(SQS_STREAM_PROVIDER_NAME, deploymentId, AWSTestConstants.DefaultSQSConnectionString).Wait();
+            SQSStreamProviderUtils.DeleteAllUsedQueues(SQS_STREAM_PROVIDER_NAME, deploymentId, AWSTestConstants.DefaultSQSConnectionString, NullLoggerFactory.Instance).Wait();
         }
 
-        [Fact]
+        [SkippableFact]
         public async Task SendAndReceiveFromSQS()
         {
             var properties = new Dictionary<string, string>
@@ -55,7 +61,7 @@ namespace AWSUtils.Tests.Streaming
             var config = new ProviderConfiguration(properties, "type", "name");
 
             var adapterFactory = new SQSAdapterFactory();
-            adapterFactory.Init(config, SQS_STREAM_PROVIDER_NAME, LogManager.GetLogger("SQSAdapter", LoggerType.Application), this.fixture.Services);
+            adapterFactory.Init(config, SQS_STREAM_PROVIDER_NAME, this.fixture.Services);
             await SendAndReceiveFromQueueAdapter(adapterFactory, config);
         }
 
@@ -122,7 +128,7 @@ namespace AWSUtils.Tests.Streaming
                 .ToList()
                 .ForEach(streamId =>
                     adapter.QueueMessageBatchAsync(streamId, streamId.ToString(),
-                        events.Take(NumMessagesPerBatch).ToArray(), null, RequestContext.Export(this.fixture.SerializationManager)).Wait())));
+                        events.Take(NumMessagesPerBatch).ToArray(), null, RequestContextExtensions.Export(this.fixture.SerializationManager)).Wait())));
             await Task.WhenAll(work);
 
             // Make sure we got back everything we sent

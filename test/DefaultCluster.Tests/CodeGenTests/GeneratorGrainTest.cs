@@ -294,8 +294,6 @@ namespace Tester.CodeGenTests
             }
         }
 
-#if !EXCLUDEFSHARP
-#if !NETSTANDARD_TODO
         [Fact, TestCategory("FSharp")]
         public async Task CodeGenDerivedFromFSharpInterfaceInDifferentAssembly()
         {
@@ -304,7 +302,5 @@ namespace Tester.CodeGenTests
             var output = await grain.Echo(input);
             Assert.Equal(input, output);
         }
-#endif
-#endif
     }
 }

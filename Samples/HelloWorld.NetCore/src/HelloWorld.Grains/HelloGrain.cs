@@ -1,5 +1,5 @@
-using System.Threading.Tasks;
 using HelloWorld.Interfaces;
+using System.Threading.Tasks;
 
 namespace HelloWorld.Grains
 {
@@ -10,7 +10,7 @@ namespace HelloWorld.Grains
     {
         Task<string> IHello.SayHello(string greeting)
         {
-            return Task.FromResult("You said: '" + greeting + "', I say: Hello!");
+            return Task.FromResult($"You said: '{greeting}', I say: Hello!");
         }
     }
 }

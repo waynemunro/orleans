@@ -5,6 +5,7 @@ using System.Linq.Expressions;
 using System.Net;
 using System.Text;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.WindowsAzure.Storage.Table;
 using Orleans.AzureUtils;
 
@@ -82,9 +83,9 @@ namespace Orleans.Runtime.ReminderService
 
         private static readonly TimeSpan initTimeout = AzureTableDefaultPolicies.TableCreationTimeout;
 
-        public static async Task<RemindersTableManager> GetManager(Guid serviceId, string deploymentId, string storageConnectionString)
+        public static async Task<RemindersTableManager> GetManager(Guid serviceId, string deploymentId, string storageConnectionString, ILoggerFactory loggerFactory)
         {
-            var singleton = new RemindersTableManager(serviceId, deploymentId, storageConnectionString);
+            var singleton = new RemindersTableManager(serviceId, deploymentId, storageConnectionString, loggerFactory);
             try
             {
                 singleton.Logger.Info("Creating RemindersTableManager for service id {0} and deploymentId {1}.", serviceId, deploymentId);
@@ -106,8 +107,8 @@ namespace Orleans.Runtime.ReminderService
             return singleton;
         }
 
-        private RemindersTableManager(Guid serviceId, string deploymentId, string storageConnectionString)
-            : base(REMINDERS_TABLE_NAME, storageConnectionString)
+        private RemindersTableManager(Guid serviceId, string deploymentId, string storageConnectionString, ILoggerFactory loggerFactory)
+            : base(REMINDERS_TABLE_NAME, storageConnectionString, loggerFactory)
         {
             DeploymentId = deploymentId;
             ServiceId = serviceId;
@@ -197,7 +198,7 @@ namespace Orleans.Runtime.ReminderService
                 string restStatus;
                 if (AzureStorageUtils.EvaluateException(exc, out httpStatusCode, out restStatus))
                 {
-                    if (Logger.IsVerbose2) Logger.Verbose2("UpsertRow failed with httpStatusCode={0}, restStatus={1}", httpStatusCode, restStatus);
+                    if (Logger.IsEnabled(LogLevel.Trace)) Logger.Trace("UpsertRow failed with httpStatusCode={0}, restStatus={1}", httpStatusCode, restStatus);
                     if (AzureStorageUtils.IsContentionError(httpStatusCode)) return null; // false;
                 }
                 throw;
@@ -217,7 +218,7 @@ namespace Orleans.Runtime.ReminderService
                 string restStatus;
                 if (AzureStorageUtils.EvaluateException(exc, out httpStatusCode, out restStatus))
                 {
-                    if (Logger.IsVerbose2) Logger.Verbose2("DeleteReminderEntryConditionally failed with httpStatusCode={0}, restStatus={1}", httpStatusCode, restStatus);
+                    if (Logger.IsEnabled(LogLevel.Trace)) Logger.Trace("DeleteReminderEntryConditionally failed with httpStatusCode={0}, restStatus={1}", httpStatusCode, restStatus);
                     if (AzureStorageUtils.IsContentionError(httpStatusCode)) return false;
                 }
                 throw;

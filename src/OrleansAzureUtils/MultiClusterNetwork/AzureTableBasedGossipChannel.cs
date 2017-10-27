@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Orleans.MultiCluster;
 using Orleans.Runtime.Configuration;
 
@@ -13,21 +14,27 @@ namespace Orleans.Runtime.MultiClusterNetwork
     /// </summary>
     internal class AzureTableBasedGossipChannel : IGossipChannel
     {
-        private Logger logger;
+        private ILogger logger;
         private GossipTableInstanceManager tableManager;
         private static int sequenceNumber;
 
         public string Name { get; private set; }
+        private readonly ILoggerFactory loggerFactory;
+
+        public AzureTableBasedGossipChannel(ILoggerFactory loggerFactory)
+        {
+            Name = "AzureTableBasedGossipChannel-" + ++sequenceNumber;
+            logger = loggerFactory.CreateLogger<AzureTableBasedGossipChannel>();
+            this.loggerFactory = loggerFactory;
+        }
 
         public async Task Initialize(Guid serviceid, string connectionstring)
         {
-            Name = "AzureTableBasedGossipChannel-" + ++sequenceNumber;
-            logger = LogManager.GetLogger(Name, LoggerType.Runtime);
 
-            logger.Info("Initializing Gossip Channel for ServiceId={0} using connection: {1}, SeverityLevel={2}",
-                serviceid, ConfigUtilities.RedactConnectionStringInfo(connectionstring), logger.SeverityLevel);
+            logger.Info("Initializing Gossip Channel for ServiceId={0} using connection: {1}",
+                serviceid, ConfigUtilities.RedactConnectionStringInfo(connectionstring));
 
-            tableManager = await GossipTableInstanceManager.GetManager(serviceid, connectionstring, logger);
+            tableManager = await GossipTableInstanceManager.GetManager(serviceid, connectionstring, this.loggerFactory);
         }
 
         // used by unit tests
@@ -42,7 +49,7 @@ namespace Orleans.Runtime.MultiClusterNetwork
 
         public async Task Publish(MultiClusterData data)
         {
-            logger.Verbose("-Publish data:{0}", data);
+            logger.Debug("-Publish data:{0}", data);
             // this is (almost) always called with just one item in data to be written back
             // so we are o.k. with doing individual tasks for each storage read and write
 
@@ -68,7 +75,7 @@ namespace Orleans.Runtime.MultiClusterNetwork
 
         public async Task<MultiClusterData> Synchronize(MultiClusterData pushed)
         {
-            logger.Verbose("-Synchronize pushed:{0}", pushed);
+            logger.Debug("-Synchronize pushed:{0}", pushed);
 
             try
             {
@@ -108,7 +115,7 @@ namespace Orleans.Runtime.MultiClusterNetwork
                 }
                 var delta = new MultiClusterData(gw, configDeltaTask.Result);
 
-                logger.Verbose("-Synchronize pulled delta:{0}", delta);
+                logger.Debug("-Synchronize pulled delta:{0}", delta);
 
                 return delta;
             }

@@ -1,9 +1,15 @@
+using System;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Orleans;
 using Orleans.AzureUtils;
+using Orleans.AzureUtils.Configuration;
 using Orleans.Messaging;
 using Orleans.Runtime;
+using Orleans.Runtime.Configuration;
 using Orleans.Runtime.MembershipService;
+using OrleansAzureUtils.Options;
 using TestExtensions;
 using UnitTests;
 using UnitTests.MembershipTests;
@@ -17,22 +23,37 @@ namespace Tester.AzureUtils
     [TestCategory("Membership"), TestCategory("Azure")]
     public class AzureMembershipTableTests : MembershipTableTestsBase, IClassFixture<AzureStorageBasicTests>
     {
-        public AzureMembershipTableTests(ConnectionStringFixture fixture, TestEnvironmentFixture environment) : base(fixture, environment)
+        public AzureMembershipTableTests(ConnectionStringFixture fixture, TestEnvironmentFixture environment) : base(fixture, environment, CreateFilters())
         {
-            LogManager.AddTraceLevelOverride("AzureTableDataManager", Severity.Verbose3);
-            LogManager.AddTraceLevelOverride("OrleansSiloInstanceManager", Severity.Verbose3);
-            LogManager.AddTraceLevelOverride("Storage", Severity.Verbose3);
+        }
+
+        private static LoggerFilterOptions CreateFilters()
+        {
+            var filters = new LoggerFilterOptions();
+            filters.AddFilter(typeof(AzureTableDataManager<>).FullName, LogLevel.Trace);
+            filters.AddFilter(typeof(OrleansSiloInstanceManager).FullName, LogLevel.Trace);
+            filters.AddFilter("Orleans.Storage", LogLevel.Trace);
+            return filters;
         }
 
         protected override IMembershipTable CreateMembershipTable(Logger logger)
         {
             TestUtils.CheckForAzureStorage();
-            return new AzureBasedMembershipTable();
+            var options = new AzureTableMembershipOptions()
+            {
+                MaxStorageBusyRetries = 3,
+                ConnectionString = this.connectionString,
+            };
+            return new AzureBasedMembershipTable(loggerFactory, Options.Create<AzureTableMembershipOptions>(options), this.globalConfiguration);
         }
 
         protected override IGatewayListProvider CreateGatewayListProvider(Logger logger)
         {
-            return new AzureGatewayListProvider();
+            var options = new AzureTableGatewayListProviderOptions()
+            {
+                ConnectionString = this.connectionString
+            };
+            return new AzureGatewayListProvider(loggerFactory, Options.Create(options), this.clientConfiguration);
         }
 
         protected override Task<string> GetConnectionString()

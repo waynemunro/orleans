@@ -2,6 +2,7 @@
 using System;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Orleans.Providers.Streams.Common;
 using Orleans.Runtime;
 using Orleans.Serialization;
@@ -22,7 +23,7 @@ namespace Orleans.Providers.Streams.AzureQueue
         private HashRingBasedStreamQueueMapper streamQueueMapper;
         private IQueueAdapterCache adapterCache;
         private Func<TDataAdapter> adaptorFactory;
-
+        private ILoggerFactory loggerFactory;
         /// <summary>
         /// Gets the serialization manager.
         /// </summary>
@@ -34,7 +35,7 @@ namespace Orleans.Providers.Streams.AzureQueue
         protected Func<QueueId, Task<IStreamFailureHandler>> StreamFailureHandlerFactory { private get; set; }
 
         /// <summary> Init the factory.</summary>
-        public virtual void Init(IProviderConfiguration config, string providerName, Logger logger, IServiceProvider serviceProvider)
+        public virtual void Init(IProviderConfiguration config, string providerName, IServiceProvider serviceProvider)
         {
             if (config == null) throw new ArgumentNullException(nameof(config));
             if (!config.Properties.TryGetValue(AzureQueueAdapterConstants.DataConnectionStringPropertyName, out dataConnectionString))
@@ -59,7 +60,7 @@ namespace Orleans.Providers.Streams.AzureQueue
             }
             
             cacheSize = SimpleQueueAdapterCache.ParseSize(config, AzureQueueAdapterConstants.CacheSizeDefaultValue);
-
+            this.loggerFactory = serviceProvider.GetRequiredService<ILoggerFactory>();
             string numQueuesString;
             numQueues = AzureQueueAdapterConstants.NumQueuesDefaultValue;
             if (config.Properties.TryGetValue(AzureQueueAdapterConstants.NumQueuesPropertyName, out numQueuesString))
@@ -70,7 +71,7 @@ namespace Orleans.Providers.Streams.AzureQueue
 
             this.providerName = providerName;
             streamQueueMapper = new HashRingBasedStreamQueueMapper(numQueues, providerName);
-            adapterCache = new SimpleQueueAdapterCache(cacheSize, logger);
+            adapterCache = new SimpleQueueAdapterCache(cacheSize, providerName, loggerFactory);
             if (StreamFailureHandlerFactory == null)
             {
                 StreamFailureHandlerFactory =
@@ -84,7 +85,7 @@ namespace Orleans.Providers.Streams.AzureQueue
         /// <summary>Creates the Azure Queue based adapter.</summary>
         public virtual Task<IQueueAdapter> CreateAdapter()
         {
-            var adapter = new AzureQueueAdapter<TDataAdapter>(this.adaptorFactory(), this.SerializationManager, streamQueueMapper, dataConnectionString, deploymentId, providerName, messageVisibilityTimeout);
+            var adapter = new AzureQueueAdapter<TDataAdapter>(this.adaptorFactory(), this.SerializationManager, streamQueueMapper, this.loggerFactory, dataConnectionString, deploymentId, providerName, messageVisibilityTimeout);
             return Task.FromResult<IQueueAdapter>(adapter);
         }
 

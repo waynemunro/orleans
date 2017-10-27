@@ -25,7 +25,7 @@ namespace UnitTests.StreamingTests
                 var options = new TestClusterOptions(2);
                 var settings = new Dictionary<string, string>
                     {
-                        {PersistentStreamProviderConfig.QUEUE_BALANCER_TYPE,StreamQueueBalancerType.DynamicClusterConfigDeploymentBalancer.ToString()},
+                        {PersistentStreamProviderConfig.QUEUE_BALANCER_TYPE, StreamQueueBalancerType.DynamicClusterConfigDeploymentBalancer.AssemblyQualifiedName},
                         {PersistentStreamProviderConfig.STREAM_PUBSUB_TYPE, StreamPubSubType.ImplicitOnly.ToString()}
                     };
                 options.ClusterConfiguration.Globals.RegisterStreamProvider<ControllableTestStreamProvider>(StreamProviderName, settings);
@@ -45,7 +45,7 @@ namespace UnitTests.StreamingTests
         {
             this.fixture.Logger.Info("************************ ControllableAdapterEchoTest *********************************");
             const string echoArg = "blarg";
-            await ControllableAdapterEchoTest(ControllableTestStreamProviderCommands.AdapterEcho, echoArg);
+            await this.ControllableAdapterEchoTestRunner(ControllableTestStreamProviderCommands.AdapterEcho, echoArg);
         }
 
         [Fact, TestCategory("Functional"), TestCategory("Streaming")]
@@ -53,10 +53,10 @@ namespace UnitTests.StreamingTests
         {
             this.fixture.Logger.Info("************************ ControllableAdapterFactoryEchoTest *********************************");
             const string echoArg = "blarg";
-            await ControllableAdapterEchoTest(ControllableTestStreamProviderCommands.AdapterFactoryEcho, echoArg);
+            await this.ControllableAdapterEchoTestRunner(ControllableTestStreamProviderCommands.AdapterFactoryEcho, echoArg);
         }
 
-        private async Task ControllableAdapterEchoTest(ControllableTestStreamProviderCommands command, object echoArg)
+        private async Task ControllableAdapterEchoTestRunner(ControllableTestStreamProviderCommands command, object echoArg)
         {
             this.fixture.Logger.Info("************************ ControllableAdapterEchoTest *********************************");
             var mgmt = this.fixture.GrainFactory.GetGrain<IManagementGrain>(0);

@@ -11,14 +11,12 @@ if((Test-Path "..\..\vNext\Binaries\Debug\") -eq $false) {
 
 dotnet restore
 if ($LastExitCode -ne 0) { return; }
-dotnet build
+
+dotnet build --no-restore
 if ($LastExitCode -ne 0) { return; }
 
 # Run the 2 console apps in different windows
 
-$siloPath = (Get-Item -Path ".\src\SiloHost\" -Verbose).FullName;
-$clientPath = (Get-Item -Path ".\src\OrleansClient\" -Verbose).FullName;
-
-Start-Process "dotnet" -ArgumentList "run" -WorkingDirectory $siloPath
+Start-Process "dotnet" -ArgumentList "run --project src/SiloHost --no-build"
 Start-Sleep 10
-Start-Process "dotnet" -ArgumentList "run" -WorkingDirectory $clientPath
+Start-Process "dotnet" -ArgumentList "run --project src/OrleansClient --no-build"

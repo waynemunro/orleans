@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.WindowsAzure.Storage.Queue;
 using Orleans.Providers;
 using Orleans.Providers.Streams.AzureQueue;
@@ -14,7 +15,10 @@ using Orleans.Runtime.Configuration;
 using Orleans.Streams;
 using TestExtensions;
 using Xunit;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit.Abstractions;
+using Microsoft.Extensions.Options;
+using Orleans.Configuration;
 
 namespace Tester.AzureUtils.Streaming
 {
@@ -28,7 +32,7 @@ namespace Tester.AzureUtils.Streaming
         private const int NumMessagesPerBatch = 20;
         private string deploymentId;
         public static readonly string AZURE_QUEUE_STREAM_PROVIDER_NAME = "AQAdapterTests";
-
+        private readonly ILoggerFactory loggerFactory;
         private static readonly SafeRandom Random = new SafeRandom();
 
         public AzureQueueAdapterTests(ITestOutputHelper output, TestEnvironmentFixture fixture)
@@ -36,13 +40,13 @@ namespace Tester.AzureUtils.Streaming
             this.output = output;
             this.fixture = fixture;
             this.deploymentId = MakeDeploymentId();
-            LogManager.Initialize(new NodeConfiguration());
-            BufferPool.InitGlobalBufferPool(new MessagingConfiguration(false));
+            this.loggerFactory = this.fixture.Services.GetService<ILoggerFactory>();
+            BufferPool.InitGlobalBufferPool(Options.Create(new SiloMessagingOptions()));
         }
         
         public void Dispose()
         {
-            AzureQueueStreamProviderUtils.DeleteAllUsedAzureQueues(AZURE_QUEUE_STREAM_PROVIDER_NAME, deploymentId, TestDefaultConfiguration.DataConnectionString).Wait();
+            AzureQueueStreamProviderUtils.DeleteAllUsedAzureQueues(this.loggerFactory, AZURE_QUEUE_STREAM_PROVIDER_NAME, deploymentId, TestDefaultConfiguration.DataConnectionString).Wait();
         }
 
         [SkippableFact, TestCategory("Functional"), TestCategory("Halo")]
@@ -57,7 +61,7 @@ namespace Tester.AzureUtils.Streaming
             var config = new ProviderConfiguration(properties, "type", "name");
 
             var adapterFactory = new AzureQueueAdapterFactory<AzureQueueDataAdapterV2>();
-            adapterFactory.Init(config, AZURE_QUEUE_STREAM_PROVIDER_NAME, LogManager.GetLogger("AzureQueueAdapter", LoggerType.Application), this.fixture.Services);
+            adapterFactory.Init(config, AZURE_QUEUE_STREAM_PROVIDER_NAME, this.fixture.Services);
             await SendAndReceiveFromQueueAdapter(adapterFactory, config);
         }
 
@@ -124,7 +128,7 @@ namespace Tester.AzureUtils.Streaming
                 .ToList()
                 .ForEach(streamId =>
                     adapter.QueueMessageBatchAsync(streamId, streamId.ToString(),
-                        events.Take(NumMessagesPerBatch).ToArray(), null, RequestContext.Export(this.fixture.SerializationManager)).Wait())));
+                        events.Take(NumMessagesPerBatch).ToArray(), null, RequestContextExtensions.Export(this.fixture.SerializationManager)).Wait())));
             await Task.WhenAll(work);
 
             // Make sure we got back everything we sent

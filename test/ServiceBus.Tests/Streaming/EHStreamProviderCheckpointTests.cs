@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.WindowsAzure.Storage.Table;
 using Orleans;
 using Orleans.AzureUtils;
@@ -42,7 +43,7 @@ namespace ServiceBus.Tests.StreamingTests
                 EHCheckpointTable, CheckpointNamespace, TimeSpan.FromSeconds(1));
 
         private static readonly EventHubStreamProviderSettings ProviderSettings =
-            new EventHubStreamProviderSettings(StreamProviderName) { CacheSizeMb = 3 };
+            new EventHubStreamProviderSettings(StreamProviderName);
 
         public override TestCluster CreateTestCluster()
         {
@@ -56,25 +57,25 @@ namespace ServiceBus.Tests.StreamingTests
         public async Task ReloadFromCheckpointTest()
         {
             logger.Info("************************ EHReloadFromCheckpointTest *********************************");
-            await ReloadFromCheckpointTest(ImplicitSubscription_RecoverableStream_CollectorGrain.StreamNamespace, 1, 256);
+            await this.ReloadFromCheckpointTestRunner(ImplicitSubscription_RecoverableStream_CollectorGrain.StreamNamespace, 1, 256);
         }
 
         [Fact]
         public async Task RestartSiloAfterCheckpointTest()
         {
             logger.Info("************************ EHRestartSiloAfterCheckpointTest *********************************");
-            await RestartSiloAfterCheckpointTest(ImplicitSubscription_RecoverableStream_CollectorGrain.StreamNamespace, 8, 32);
+            await this.RestartSiloAfterCheckpointTestRunner(ImplicitSubscription_RecoverableStream_CollectorGrain.StreamNamespace, 8, 32);
         }
 
         public override void Dispose()
         {
-            var dataManager = new AzureTableDataManager<TableEntity>(CheckpointerSettings.TableName, CheckpointerSettings.DataConnectionString);
+            var dataManager = new AzureTableDataManager<TableEntity>(CheckpointerSettings.TableName, CheckpointerSettings.DataConnectionString, NullLoggerFactory.Instance);
             dataManager.InitTableAsync().Wait();
             dataManager.ClearTableAsync().Wait();
             base.Dispose();
         }
 
-        private async Task ReloadFromCheckpointTest(string streamNamespace, int streamCount, int eventsInStream)
+        private async Task ReloadFromCheckpointTestRunner(string streamNamespace, int streamCount, int eventsInStream)
         {
             List<Guid> streamGuids = Enumerable.Range(0, streamCount).Select(_ => Guid.NewGuid()).ToList();
             try
@@ -94,7 +95,7 @@ namespace ServiceBus.Tests.StreamingTests
             }
         }
 
-        private async Task RestartSiloAfterCheckpointTest(string streamNamespace, int streamCount, int eventsInStream)
+        private async Task RestartSiloAfterCheckpointTestRunner(string streamNamespace, int streamCount, int eventsInStream)
         {
             List<Guid> streamGuids = Enumerable.Range(0, streamCount).Select(_ => Guid.NewGuid()).ToList();
             try
@@ -189,7 +190,7 @@ namespace ServiceBus.Tests.StreamingTests
             CheckpointerSettings.WriteProperties(settings);
 
             // add queue balancer setting
-            settings.Add(PersistentStreamProviderConfig.QUEUE_BALANCER_TYPE, StreamQueueBalancerType.DynamicClusterConfigDeploymentBalancer.ToString());
+            settings.Add(PersistentStreamProviderConfig.QUEUE_BALANCER_TYPE, StreamQueueBalancerType.DynamicClusterConfigDeploymentBalancer.AssemblyQualifiedName);
 
             // add pub/sub settting
             settings.Add(PersistentStreamProviderConfig.STREAM_PUBSUB_TYPE, StreamPubSubType.ImplicitOnly.ToString());

@@ -1,8 +1,6 @@
 ﻿using System;
 using System.Threading.Tasks;
-#if !EXCLUDEFSHARP
 using Microsoft.FSharp.Core;
-#endif
 using Orleans.Serialization;
 using TestExtensions;
 using UnitTests.GrainInterfaces;
@@ -12,7 +10,7 @@ namespace DefaultCluster.Tests.General
 {
     /// <summary>
     /// Unit tests for grains implementing generic interfaces
-    /// </summary
+    /// </summary>
     public class KnownAssemblyAttributeTests : HostedTestClusterEnsureDefaultStarted
     {
         public KnownAssemblyAttributeTests(DefaultClusterFixture fixture) : base(fixture)
@@ -44,7 +42,6 @@ namespace DefaultCluster.Tests.General
             ClientSerializerExists(typeof(UnitTests.Grains.SimpleGrainState));
         }
 
-#if !EXCLUDEFSHARP
         [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("CodeGen"), TestCategory("Serialization")]
         public async Task Silo_Serializer_Exists_for_Type_In_Known_Assembly()
         {
@@ -57,8 +54,6 @@ namespace DefaultCluster.Tests.General
             ClientSerializerExists(typeof(FSharpOption<>));
         }
 
-#if !NETSTANDARD_TODO
-        // wait for FSharp projetcs ported over
         [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("CodeGen"), TestCategory("Serialization")]
         public async Task Silo_Serializer_Exists_for_Type_In_Grain_Assembly_containing_KnownAssemblyAttribute()
         {
@@ -70,7 +65,5 @@ namespace DefaultCluster.Tests.General
         {
             ClientSerializerExists(typeof(UnitTests.FSharpTypes.SingleCaseDU));
         }
-#endif
-#endif
     }
 }

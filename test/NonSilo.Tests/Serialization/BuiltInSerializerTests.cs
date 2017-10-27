@@ -13,6 +13,7 @@ using Orleans.Concurrency;
 using Orleans.Runtime;
 using Orleans.Runtime.Configuration;
 using Orleans.Serialization;
+using Orleans.ServiceBus.Providers;
 using Orleans.Streams;
 using TestExtensions;
 using UnitTests.GrainInterfaces;
@@ -54,12 +55,10 @@ namespace UnitTests.Serialization
             NoFallback
         }
 
-        public static object[] FallbackSerializers =
+        public static IEnumerable<object[]> FallbackSerializers = new[]
         {
             new object[] { SerializerToUse.Default },
-#if !NETSTANDARD_TODO
             new object[] { SerializerToUse.BinaryFormatterFallbackSerializer },
-#endif
             new object[] { SerializerToUse.IlBasedFallbackSerializer }
         };
 
@@ -80,11 +79,9 @@ namespace UnitTests.Serialization
                         case SerializerToUse.IlBasedFallbackSerializer:
                             fallback = typeof(ILBasedSerializer).GetTypeInfo();
                             break;
-#if !NETSTANDARD_TODO
                         case SerializerToUse.BinaryFormatterFallbackSerializer:
                             fallback = typeof(BinaryFormatterSerializer).GetTypeInfo();
                             break;
-#endif
                         case SerializerToUse.NoFallback:
                             fallback = typeof(SupportsNothingSerializer).GetTypeInfo();
                             break;
@@ -111,20 +108,25 @@ namespace UnitTests.Serialization
             this.output = output;
             this.defaultFixture = fixture;
             this.serializerFixture = serializerFixture;
-            LogManager.Initialize(new NodeConfiguration());
         }
 
         [Fact, TestCategory("BVT"), TestCategory("Serialization"), TestCategory("CodeGen")]
         public void InternalSerializableTypesHaveSerializers()
         {
-            var environment = InitializeSerializer(SerializerToUse.Default);
+            var environment = InitializeSerializer(SerializerToUse.NoFallback);
+            Assert.True(
+                environment.SerializationManager.HasSerializer(typeof(int)),
+                $"Should be able to serialize internal type {nameof(Int32)}.");
+            Assert.True(
+                environment.SerializationManager.HasSerializer(typeof(List<int>)),
+                $"Should be able to serialize internal type {nameof(List<int>)}.");
             Assert.True(
                 environment.SerializationManager.HasSerializer(typeof(AddressesAndTag)),
                 $"Should be able to serialize internal type {nameof(AddressesAndTag)}.");
             Assert.True(
                 environment.SerializationManager.HasSerializer(typeof(ActivationInfo)),
                 $"Should be able to serialize internal type {nameof(ActivationInfo)}.");
-            var grainReferenceType = typeof(IGrain).Assembly.GetType(
+            var grainReferenceType = typeof(RuntimeVersion).Assembly.GetType(
                 "Orleans.OrleansCodeGenRemindableReference",
                 throwOnError: true);
             Assert.True(
@@ -133,6 +135,21 @@ namespace UnitTests.Serialization
             Assert.True(
                 environment.SerializationManager.HasSerializer(typeof(PubSubGrainState)),
                 $"Should be able to serialize internal type {nameof(PubSubGrainState)}.");
+            Assert.True(
+                environment.SerializationManager.HasSerializer(typeof(EventHubBatchContainer)),
+                $"Should be able to serialize internal type {nameof(EventHubBatchContainer)}.");
+            Assert.True(
+                environment.SerializationManager.HasSerializer(typeof(EventHubSequenceTokenV2)),
+                $"Should be able to serialize internal type {nameof(EventHubSequenceTokenV2)}.");
+        }
+
+        [Fact(Skip = "See https://github.com/dotnet/orleans/issues/3531"), TestCategory("BVT"), TestCategory("Serialization"), TestCategory("CodeGen")]
+        public void ValueTupleTypesHasSerializer()
+        {
+            var environment = InitializeSerializer(SerializerToUse.NoFallback);
+            Assert.True(
+                environment.SerializationManager.HasSerializer(typeof(ValueTuple<int, AddressAndTag>)),
+                $"Should be able to serialize internal type {nameof(ValueTuple<int, AddressAndTag>)}.");
         }
 
         [Theory, TestCategory("BVT"), TestCategory("Serialization")]
@@ -338,7 +355,7 @@ namespace UnitTests.Serialization
             var deserialized = OrleansSerializationLoop(environment.SerializationManager, source1);
             ValidateDictionary<string, string>(source1, deserialized, "case-insensitive string/string");
             Dictionary<string, string> result1 = deserialized as Dictionary<string, string>;
-            Assert.Equal<string>(source1["Hello"], result1["hElLo"]); //Round trip for case insensitive string/string dictionary lost the custom comparer
+            Assert.Equal(source1["Hello"], result1["hElLo"]); //Round trip for case insensitive string/string dictionary lost the custom comparer
 
             Dictionary<int, DateTime> source2 = new Dictionary<int, DateTime>(new Mod5IntegerComparer());
             source2[3] = DateTime.Now;
@@ -347,30 +364,6 @@ namespace UnitTests.Serialization
             ValidateDictionary<int, DateTime>(source2, deserialized, "int/date");
             Dictionary<int, DateTime> result2 = (Dictionary<int, DateTime>)deserialized;
             Assert.Equal<DateTime>(source2[3], result2[13]);  //Round trip for case insensitive int/DateTime dictionary lost the custom comparer"
-        }
-
-        public enum IntEnum
-        {
-            Value1,
-            Value2,
-            Value3
-        }
-
-        public enum UShortEnum : ushort
-        {
-            Value1,
-            Value2,
-            Value3
-        }
-
-        public enum CampaignEnemyType : sbyte
-        {
-            None = -1,
-            Brute = 0,
-            Enemy1,
-            Enemy2,
-            Enemy3,
-            Enemy4,
         }
 
         [Theory, TestCategory("Functional"), TestCategory("Serialization")]
@@ -413,11 +406,13 @@ namespace UnitTests.Serialization
             Assert.IsAssignableFrom(source1.GetType(), deserialized); //Type is wrong after round-trip of string hash set with comparer
             var result = deserialized as HashSet<string>;
             Assert.Equal(source1.Count, result.Count); //Count is wrong after round-trip of string hash set with comparer
+#pragma warning disable xUnit2017 // Do not use Contains() to check if a value exists in a collection
             foreach (var key in source1)
             {
                 Assert.True(result.Contains(key)); //key is missing after round-trip of string hash set with comparer
             }
             Assert.True(result.Contains("One")); //Comparer is wrong after round-trip of string hash set with comparer
+#pragma warning restore xUnit2017 // Do not use Contains() to check if a value exists in a collection
         }
 
         [Theory, TestCategory("Functional"), TestCategory("Serialization")]
@@ -439,7 +434,7 @@ namespace UnitTests.Serialization
             var resIter = result.GetEnumerator();
             while (srcIter.MoveNext() && resIter.MoveNext())
             {
-                Assert.Equal<string>(srcIter.Current, resIter.Current); //Data is wrong after round-trip of string stack
+                Assert.Equal(srcIter.Current, resIter.Current); //Data is wrong after round-trip of string stack
             }
         }
 
@@ -462,7 +457,7 @@ namespace UnitTests.Serialization
             Assert.Equal(input.Int, result.Int);
             Assert.Null(input.Context);
             Assert.NotNull(result.Context);
-            Assert.Equal(environment.SerializationManager, result.Context.SerializationManager);
+            Assert.Equal(environment.SerializationManager, result.Context.GetSerializationManager());
         }
 
         [Theory, TestCategory("Functional"), TestCategory("Serialization")]
@@ -479,11 +474,13 @@ namespace UnitTests.Serialization
             Assert.IsAssignableFrom(source1.GetType(), deserialized); //Type is wrong after round-trip of string sorted set with comparer
             var result = (SortedSet<string>)deserialized;
             Assert.Equal(source1.Count, result.Count); //Count is wrong after round-trip of string sorted set with comparer
+#pragma warning disable xUnit2017 // Do not use Contains() to check if a value exists in a collection
             foreach (var key in source1)
             {
                 Assert.True(result.Contains(key)); //key is missing after round-trip of string sorted set with comparer
             }
             Assert.True(result.Contains("One")); //Comparer is wrong after round-trip of string sorted set with comparer
+#pragma warning restore xUnit2017 // Do not use Contains() to check if a value exists in a collection
         }
 
         [Theory, TestCategory("Functional"), TestCategory("Serialization")]
@@ -542,11 +539,11 @@ namespace UnitTests.Serialization
             var result = Assert.IsAssignableFrom<HashSet<string>[][]>(deserialized); //Array of arrays of hash sets type is wrong on deserialization
             Assert.Equal(3, result.Length); //Outer array size wrong on array of array of sets
             Assert.Equal(2, result[0][0].Count); //Inner set size wrong on array of array of sets, element 0,0
-            Assert.Equal(0, result[0][1].Count); //Inner set size wrong on array of array of sets, element 0,1
-            Assert.Equal(1, result[1][0].Count); //Inner set size wrong on array of array of sets, element 1,0
+            Assert.Empty(result[0][1]); //Inner set size wrong on array of array of sets, element 0,1
+            Assert.Single(result[1][0]); //Inner set size wrong on array of array of sets, element 1,0
             Assert.Null(result[1][1]); //Inner set not null on array of array of sets, element 1, 1
-            Assert.Equal(1, result[1][2].Count); //Inner set size wrong on array of array of sets, element 1,2
-            Assert.Equal(1, result[2][0].Count); //Inner set size wrong on array of array of sets, element 2,0
+            Assert.Single(result[1][2]); //Inner set size wrong on array of array of sets, element 1,2
+            Assert.Single(result[2][0]); //Inner set size wrong on array of array of sets, element 2,0
 
             var source4 = new GrainReference[3][];
             source4[0] = new GrainReference[2];
@@ -600,19 +597,6 @@ namespace UnitTests.Serialization
             ValidateReadOnlyCollectionList(collection, deserialized, "string/string");
         }
 
-        public class UnserializableException : Exception
-        {
-            public UnserializableException(string message) : base(message)
-            { }
-
-            [CopierMethod]
-            static private object Copy(object input, ICopyContext context)
-            {
-                return input;
-            }
-        }
-
-#if !NETSTANDARD_TODO // On .NET Standard, the IL-based fallback serializer is used, so this is expected to fail (because serialization succeeds).
         [Theory, TestCategory("Functional"), TestCategory("Serialization")]
         [InlineData(SerializerToUse.Default)]
         [InlineData(SerializerToUse.BinaryFormatterFallbackSerializer)]
@@ -629,12 +613,8 @@ namespace UnitTests.Serialization
                                     typeof(UnserializableException).OrleansTypeName() + ": " + Message;
             Assert.Contains(expectedMessage, result.Message); //Exception message is wrong after round trip of unserializable exception
         }
-#endif
 
         [Theory, TestCategory("Functional"), TestCategory("Serialization")]
-#if NETSTANDARD_TODO // On .NET Standard, the IL-based fallback serializer is used, so this is expected to pass.
-        [InlineData(SerializerToUse.Default)]
-#endif
         [InlineData(SerializerToUse.IlBasedFallbackSerializer)]
         public void Serialize_UnserializableException_IlFallback(SerializerToUse serializerToUse)
         {
@@ -681,13 +661,6 @@ namespace UnitTests.Serialization
             Assert.Same(list1, list2); //Object identity lost after round trip of string/list dict
             Assert.NotSame(list2, list3); //Object identity gained after round trip of string/list dict
             Assert.NotSame(list1, list3); //Object identity gained after round trip of string/list dict
-        }
-
-        [Serializable]
-        public class Unrecognized
-        {
-            public int A { get; set; }
-            public int B { get; set; }
         }
 
         [Theory, TestCategory("Functional"), TestCategory("Serialization")]
@@ -817,7 +790,6 @@ namespace UnitTests.Serialization
             Assert.Equal(input, grainRef); //Wrong contents after round-trip of input
         }
 
-#if !NETSTANDARD_TODO
         [Theory, TestCategory("Functional"), TestCategory("Serialization")]
         [InlineData(SerializerToUse.NoFallback)]
         public void Serialize_GrainReference_ViaStandardSerializer(SerializerToUse serializerToUse)
@@ -849,7 +821,6 @@ namespace UnitTests.Serialization
 
             Assert.Contains("is not marked as serializable", exc.Message);
         }
-#endif
 
         [Theory, TestCategory("Functional"), TestCategory("Serialization")]
         [InlineData(SerializerToUse.NoFallback)]
@@ -875,17 +846,17 @@ namespace UnitTests.Serialization
 
             // 1: {[1}, {2], 3}
             Assert.Equal(0, actual1[0].Offset);
-            Assert.Equal(1, actual1[0].Count);
+            Assert.Single(actual1[0]);
             Assert.Equal(array1, actual1[0].Array);
             Assert.Equal(0, actual1[1].Offset);
-            Assert.Equal(1, actual1[1].Count);
+            Assert.Single(actual1[1]);
             Assert.Equal(array2, actual1[1].Array);
             // 2: {2, [3}, {4], 5, 6}
             Assert.Equal(1, actual2[0].Offset);
-            Assert.Equal(1, actual2[0].Count);
+            Assert.Single(actual2[0]);
             Assert.Equal(array2, actual2[0].Array);
             Assert.Equal(0, actual2[1].Offset);
-            Assert.Equal(1, actual2[1].Count);
+            Assert.Single(actual2[1]);
             Assert.Equal(array3, actual2[1].Array);
             // 3: {4, [5, 6]}
             Assert.Equal(1, actual3[0].Offset);
@@ -960,9 +931,7 @@ namespace UnitTests.Serialization
             object deserialized;
             var formatter = new BinaryFormatter
             {
-#if !NETSTANDARD_TODO
                 Context = new StreamingContext(StreamingContextStates.All, new SerializationContext(serializationManager))
-#endif
             };
             using (var str = new MemoryStream())
             {
@@ -974,11 +943,6 @@ namespace UnitTests.Serialization
             {
                 deserialized = formatter.Deserialize(inStream);
             }
-#if NETSTANDARD_TODO
-                // On .NET Standard, currently we need to manually fixup grain references.
-                var grainRef = deserialized as GrainReference;
-                if (grainRef != null) grainFactory.BindGrainReference(grainRef);
-#endif
             return deserialized;
         }
 

@@ -1,4 +1,5 @@
-﻿using Orleans.Providers.Streams;
+﻿using AWSUtils.Tests.StorageTests;
+using Orleans.Providers.Streams;
 using Orleans.Runtime;
 using Orleans.Runtime.Configuration;
 using Orleans.TestingHost;
@@ -6,6 +7,7 @@ using OrleansAWSUtils.Streams;
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using Tester.StreamingTests;
 using TestExtensions;
 using Xunit;
@@ -17,7 +19,7 @@ namespace AWSUtils.Tests.Streaming
     {
         private const string SQSStreamProviderName = "SQSProvider";
         private const string StreamNamespace = "SQSSubscriptionMultiplicityTestsNamespace";
-        private const string StorageConnectionString = "";
+        private string StorageConnectionString = AWSTestConstants.DefaultSQSConnectionString;
 
         private readonly ITestOutputHelper output;
         private readonly ClientStreamTestRunner runner;
@@ -30,6 +32,11 @@ namespace AWSUtils.Tests.Streaming
         
         public override TestCluster CreateTestCluster()
         {
+            if (!AWSTestConstants.IsSqsAvailable)
+            {
+                throw new SkipException("Empty connection string");
+            }
+
             var deploymentId = Guid.NewGuid().ToString();
             var streamConnectionString = new Dictionary<string, string>
                 {
@@ -53,10 +60,10 @@ namespace AWSUtils.Tests.Streaming
         {
             var deploymentId = HostedCluster.DeploymentId;
             base.Dispose();
-            SQSStreamProviderUtils.DeleteAllUsedQueues(SQSStreamProviderName, deploymentId, StorageConnectionString).Wait();
+            SQSStreamProviderUtils.DeleteAllUsedQueues(SQSStreamProviderName, deploymentId, StorageConnectionString, NullLoggerFactory.Instance).Wait();
         }
 
-        [Fact, TestCategory("AWS")]
+        [SkippableFact, TestCategory("AWS")]
         public async Task SQSStreamProducerOnDroppedClientTest()
         {
             logger.Info("************************ AQStreamProducerOnDroppedClientTest *********************************");

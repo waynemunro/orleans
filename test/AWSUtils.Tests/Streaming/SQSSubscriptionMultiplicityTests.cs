@@ -1,4 +1,5 @@
-﻿using Orleans;
+﻿using AWSUtils.Tests.StorageTests;
+using Orleans;
 using Orleans.Providers.Streams;
 using Orleans.Runtime;
 using Orleans.Runtime.Configuration;
@@ -7,6 +8,7 @@ using OrleansAWSUtils.Streams;
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using TestExtensions;
 using UnitTests.StreamingTests;
 using Xunit;
@@ -17,11 +19,16 @@ namespace AWSUtils.Tests.Streaming
     {
         private const string SQSStreamProviderName = "SQSProvider";
         private const string StreamNamespace = "SQSSubscriptionMultiplicityTestsNamespace";
-        private const string StreamConnectionString = "";
+        private string StreamConnectionString = AWSTestConstants.DefaultSQSConnectionString;
         private readonly SubscriptionMultiplicityTestRunner runner;
 
         public override TestCluster CreateTestCluster()
         {
+            if (!AWSTestConstants.IsSqsAvailable)
+            {
+                throw new SkipException("Empty connection string");
+            }
+
             var deploymentId = Guid.NewGuid().ToString();
             var streamConnectionString = new Dictionary<string, string>
                 {
@@ -49,59 +56,59 @@ namespace AWSUtils.Tests.Streaming
         {
             var deploymentId = HostedCluster.DeploymentId;
             base.Dispose();
-            SQSStreamProviderUtils.DeleteAllUsedQueues(SQSStreamProviderName, deploymentId, StreamConnectionString).Wait();
+            SQSStreamProviderUtils.DeleteAllUsedQueues(SQSStreamProviderName, deploymentId, StreamConnectionString, NullLoggerFactory.Instance).Wait();
         }
 
-        [Fact, TestCategory("AWS")]
+        [SkippableFact, TestCategory("AWS")]
         public async Task SQSMultipleParallelSubscriptionTest()
         {
             logger.Info("************************ SQSMultipleParallelSubscriptionTest *********************************");
             await runner.MultipleParallelSubscriptionTest(Guid.NewGuid(), StreamNamespace);
         }
 
-        [Fact, TestCategory("AWS")]
+        [SkippableFact, TestCategory("AWS")]
         public async Task SQSMultipleLinearSubscriptionTest()
         {
             logger.Info("************************ SQSMultipleLinearSubscriptionTest *********************************");
             await runner.MultipleLinearSubscriptionTest(Guid.NewGuid(), StreamNamespace);
         }
 
-        [Fact, TestCategory("AWS")]
+        [SkippableFact, TestCategory("AWS")]
         public async Task SQSMultipleSubscriptionTest_AddRemove()
         {
             logger.Info("************************ SQSMultipleSubscriptionTest_AddRemove *********************************");
             await runner.MultipleSubscriptionTest_AddRemove(Guid.NewGuid(), StreamNamespace);
         }
 
-        [Fact, TestCategory("AWS")]
+        [SkippableFact, TestCategory("AWS")]
         public async Task SQSResubscriptionTest()
         {
             logger.Info("************************ SQSResubscriptionTest *********************************");
             await runner.ResubscriptionTest(Guid.NewGuid(), StreamNamespace);
         }
 
-        [Fact, TestCategory("AWS")]
+        [SkippableFact, TestCategory("AWS")]
         public async Task SQSResubscriptionAfterDeactivationTest()
         {
             logger.Info("************************ ResubscriptionAfterDeactivationTest *********************************");
             await runner.ResubscriptionAfterDeactivationTest(Guid.NewGuid(), StreamNamespace);
         }
 
-        [Fact, TestCategory("AWS")]
+        [SkippableFact, TestCategory("AWS")]
         public async Task SQSActiveSubscriptionTest()
         {
             logger.Info("************************ SQSActiveSubscriptionTest *********************************");
             await runner.ActiveSubscriptionTest(Guid.NewGuid(), StreamNamespace);
         }
 
-        [Fact, TestCategory("AWS")]
+        [SkippableFact, TestCategory("AWS")]
         public async Task SQSTwoIntermitentStreamTest()
         {
             logger.Info("************************ SQSTwoIntermitentStreamTest *********************************");
             await runner.TwoIntermitentStreamTest(Guid.NewGuid());
         }
 
-        [Fact, TestCategory("AWS")]
+        [SkippableFact, TestCategory("AWS")]
         public async Task SQSSubscribeFromClientTest()
         {
             logger.Info("************************ SQSSubscribeFromClientTest *********************************");

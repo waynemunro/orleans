@@ -58,7 +58,7 @@ namespace UnitTests.StorageTests.Relational
                 //A sanity checker that the first version really has null as its state. Then it is stored
                 //to the database and a new version is acquired.
                 var firstVersion = grainData.Item2.ETag;
-                Assert.Equal(firstVersion, null);
+                Assert.Null(firstVersion);
 
                 await Store_WriteRead(grainTypeName, grainData.Item1, grainData.Item2);
                 var secondVersion = grainData.Item2.ETag;
@@ -176,6 +176,7 @@ namespace UnitTests.StorageTests.Relational
         /// Writes to storage, clears and reads back and asserts both the version and the state.
         /// </summary>
         /// <typeparam name="T"></typeparam>
+        /// <param name="grainTypeName">The type of the grain.</param>
         /// <param name="grainReference">The grain reference as would be given by Orleans.</param>
         /// <param name="grainState">The grain state the grain would hold and Orleans pass.</param>
         /// <returns></returns>

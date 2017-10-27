@@ -74,7 +74,7 @@ namespace UnitTests.StreamingTests
             SetErrorInjection(PubSubStoreProviderName, ErrorInjectionPoint.BeforeRead);
 
             // TODO: expect StorageProviderInjectedError directly instead of OrleansException
-            await Assert.ThrowsAsync<OrleansException>(() =>
+            await Assert.ThrowsAsync<StorageProviderInjectedError>(() =>
                 Test_PubSub_Stream(StreamProviderName, StreamId));
         }
 
@@ -83,10 +83,8 @@ namespace UnitTests.StreamingTests
         {
             SetErrorInjection(PubSubStoreProviderName, ErrorInjectionPoint.BeforeWrite);
 
-            var exception = await Assert.ThrowsAsync<OrleansException>(() =>
+            var exception = await Assert.ThrowsAsync<StorageProviderInjectedError>(() =>
                 Test_PubSub_Stream(StreamProviderName, StreamId));
-
-            Assert.IsAssignableFrom<StorageProviderInjectedError>(exception.InnerException);
         }
 
         private async Task Test_PubSub_Stream(string streamProviderName, Guid streamId)

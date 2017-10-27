@@ -120,8 +120,6 @@ namespace UnitTests.Serialization
             }
         }
 
-#if !NETSTANDARD_TODO
-
         [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("Serialization")]
         public void SerializationTests_RecursiveSerialization()
         {
@@ -133,8 +131,6 @@ namespace UnitTests.Serialization
 
             TestTypeA output2 = this.fixture.SerializationManager.RoundTripSerializationForTesting(input);
         }
-
-#endif
 
         [Fact, TestCategory("BVT"), TestCategory("Functional"), TestCategory("Serialization")]
         public void SerializationTests_CultureInfo()
@@ -155,6 +151,118 @@ namespace UnitTests.Serialization
 
             var output = this.fixture.SerializationManager.RoundTripSerializationForTesting(input);
             Assert.True(input.SequenceEqual(output));
+        }
+
+        [Fact(Skip = "See https://github.com/dotnet/orleans/issues/3531"), TestCategory("BVT"), TestCategory("Functional"), TestCategory("Serialization")]
+        public void SerializationTests_ValueTuple()
+        {
+            var input = new List<ValueTuple<int>> { ValueTuple.Create(1), ValueTuple.Create(100) };
+
+            foreach (var valueTuple in input)
+            {
+                var output = this.fixture.SerializationManager.RoundTripSerializationForTesting(valueTuple);
+                Assert.Equal(valueTuple, output);
+            }
+        }
+
+        [Fact(Skip = "See https://github.com/dotnet/orleans/issues/3531"), TestCategory("BVT"), TestCategory("Functional"), TestCategory("Serialization")]
+        public void SerializationTests_ValueTuple2()
+        {
+            var input = new List<ValueTuple<int, int>> { ValueTuple.Create(1, 2), ValueTuple.Create(100, 200) };
+
+            foreach (var valueTuple in input)
+            {
+                var output = this.fixture.SerializationManager.RoundTripSerializationForTesting(valueTuple);
+                Assert.Equal(valueTuple, output);
+            }
+        }
+
+        [Fact(Skip = "See https://github.com/dotnet/orleans/issues/3531"), TestCategory("BVT"), TestCategory("Functional"), TestCategory("Serialization")]
+        public void SerializationTests_ValueTuple3()
+        {
+            var input = new List<ValueTuple<int, int, int>>
+            {
+                ValueTuple.Create(1, 2, 3),
+                ValueTuple.Create(100, 200, 300)
+            };
+
+            foreach (var valueTuple in input)
+            {
+                var output = this.fixture.SerializationManager.RoundTripSerializationForTesting(valueTuple);
+                Assert.Equal(valueTuple, output);
+            }
+        }
+
+        [Fact(Skip = "See https://github.com/dotnet/orleans/issues/3531"), TestCategory("BVT"), TestCategory("Functional"), TestCategory("Serialization")]
+        public void SerializationTests_ValueTuple4()
+        {
+            var input = new List<ValueTuple<int, int, int, int>>
+            {
+                ValueTuple.Create(1, 2, 3, 4),
+                ValueTuple.Create(100, 200, 300, 400)
+            };
+
+            foreach (var valueTuple in input)
+            {
+                var output = this.fixture.SerializationManager.RoundTripSerializationForTesting(valueTuple);
+                Assert.Equal(valueTuple, output);
+            }
+        }
+
+        [Fact(Skip = "See https://github.com/dotnet/orleans/issues/3531"), TestCategory("BVT"), TestCategory("Functional"), TestCategory("Serialization")]
+        public void SerializationTests_ValueTuple5()
+        {
+            var input = new List<ValueTuple<int, int, int, int, int>>
+            {
+                ValueTuple.Create(1, 2, 3, 4, 5),
+                ValueTuple.Create(100, 200, 300, 400, 500)
+            };
+
+            foreach (var valueTuple in input)
+            {
+                var output = this.fixture.SerializationManager.RoundTripSerializationForTesting(valueTuple);
+                Assert.Equal(valueTuple, output);
+            }
+        }
+
+        [Fact(Skip = "See https://github.com/dotnet/orleans/issues/3531"), TestCategory("BVT"), TestCategory("Functional"), TestCategory("Serialization")]
+        public void SerializationTests_ValueTuple6()
+        {
+            var input = new List<ValueTuple<int, int, int, int, int, int>>
+            {
+                ValueTuple.Create(1, 2, 3, 4, 5, 6),
+                ValueTuple.Create(100, 200, 300, 400, 500, 600)
+            };
+
+            foreach (var valueTuple in input)
+            {
+                var output = this.fixture.SerializationManager.RoundTripSerializationForTesting(valueTuple);
+                Assert.Equal(valueTuple, output);
+            }
+        }
+
+        [Fact(Skip = "See https://github.com/dotnet/orleans/issues/3531"), TestCategory("BVT"), TestCategory("Functional"), TestCategory("Serialization")]
+        public void SerializationTests_ValueTuple7()
+        {
+            var input = new List<ValueTuple<int, int, int, int, int, int, int>>
+            {
+                ValueTuple.Create(1, 2, 3, 4, 5, 6, 7),
+                ValueTuple.Create(100, 200, 300, 400, 500, 600, 700)
+            };
+
+            foreach (var valueTuple in input)
+            {
+                var output = this.fixture.SerializationManager.RoundTripSerializationForTesting(valueTuple);
+                Assert.Equal(valueTuple, output);
+            }
+        }
+
+        [Fact(Skip = "See https://github.com/dotnet/orleans/issues/3531"), TestCategory("BVT"), TestCategory("Functional"), TestCategory("Serialization")]
+        public void SerializationTests_ValueTuple8()
+        {
+            var valueTuple = ValueTuple.Create(1, 2, 3, 4, 5, 6, 7, 8);
+            var output = this.fixture.SerializationManager.RoundTripSerializationForTesting(valueTuple);
+            Assert.Equal(valueTuple, output);
         }
     }
 }

@@ -20,12 +20,10 @@ namespace Benchmarks.MapReduce
         private readonly int _repeats = 50000;
         private int _currentRepeat = 0;
 
-        [Setup]
+        [GlobalSetup]
         public void BenchmarkSetup()
         {
             var options = new TestClusterOptions(1);
-            options.ExtendedFallbackOptions.TraceToConsole = false;
-            options.ClusterConfiguration.ApplyToAllNodes(c => c.DefaultTraceLevel = Severity.Warning);
             _host = new TestCluster(options);
             _host.Deploy();
         }

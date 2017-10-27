@@ -1,4 +1,7 @@
 ﻿using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Orleans.Providers.Streams.AzureQueue;
 using Orleans.Runtime.Configuration;
 using Orleans.TestingHost;
@@ -16,7 +19,6 @@ namespace Tester.AzureUtils.Streaming
         public const string SmsStreamProviderName = StreamTestsConstants.SMS_STREAM_PROVIDER_NAME;
 
         private readonly SingleStreamTestRunner runner;
-
         public override TestCluster CreateTestCluster()
         {
             TestUtils.CheckForAzureStorage();
@@ -45,7 +47,7 @@ namespace Tester.AzureUtils.Streaming
         {
             var deploymentId = HostedCluster.DeploymentId;
             base.Dispose();
-            AzureQueueStreamProviderUtils.DeleteAllUsedAzureQueues(SingleStreamTestRunner.AQ_STREAM_PROVIDER_NAME, deploymentId, TestDefaultConfiguration.DataConnectionString).Wait();
+            AzureQueueStreamProviderUtils.DeleteAllUsedAzureQueues(NullLoggerFactory.Instance, SingleStreamTestRunner.AQ_STREAM_PROVIDER_NAME, deploymentId, TestDefaultConfiguration.DataConnectionString).Wait();
         }
 
         ////------------------------ One to One ----------------------//
@@ -163,13 +165,13 @@ namespace Tester.AzureUtils.Streaming
         }
 
         //[SkippableFact, TestCategory("BVT"), TestCategory("Functional")]
-        public async Task AQ_18_MultipleStreams_1J_1F_ManyProducerGrainsManyConsumerGrains()
+        /*public async Task AQ_18_MultipleStreams_1J_1F_ManyProducerGrainsManyConsumerGrains()
         {
             var multiRunner = new MultipleStreamsTestRunner(this.InternalClient, SingleStreamTestRunner.AQ_STREAM_PROVIDER_NAME, 18, false);
             await multiRunner.StreamTest_MultipleStreams_ManyDifferent_ManyProducerGrainsManyConsumerGrains(
                 this.HostedCluster.StartAdditionalSilo,
                 this.HostedCluster.StopSilo);
-        }
+        }*/
 
         [SkippableFact]
         public async Task AQ_19_ConsumerImplicitlySubscribedToProducerClient()

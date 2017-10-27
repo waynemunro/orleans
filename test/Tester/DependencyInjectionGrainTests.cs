@@ -8,6 +8,10 @@ using TestExtensions;
 using UnitTests.GrainInterfaces;
 using UnitTests.Grains;
 using Xunit;
+using System.Collections.Generic;
+using System.Linq;
+using Orleans.Hosting;
+using Orleans.TestingHost.Utils;
 
 namespace UnitTests.General
 {
@@ -21,8 +25,34 @@ namespace UnitTests.General
             protected override TestCluster CreateTestCluster()
             {
                 var options = new TestClusterOptions(1);
-                options.ClusterConfiguration.UseStartupType<TestStartup>();
+                options.UseSiloBuilderFactory<TestSiloBuilderFactory>();
                 return new TestCluster(options);
+            }
+
+            private class TestSiloBuilderFactory : ISiloBuilderFactory
+            {
+                public ISiloHostBuilder CreateSiloBuilder(string siloName, ClusterConfiguration clusterConfiguration)
+                {
+                    return new SiloHostBuilder()
+                        .ConfigureSiloName(siloName)
+                        .UseConfiguration(clusterConfiguration)
+                        .ConfigureServices(ConfigureServices)
+                        .ConfigureLogging(builder => TestingUtils.ConfigureDefaultLoggingBuilder(builder, TestingUtils.CreateTraceFileName(siloName, clusterConfiguration.Globals.DeploymentId)));
+                }
+            }
+
+            private static void ConfigureServices(IServiceCollection services)
+            {
+                services.AddSingleton<IInjectedService, InjectedService>();
+                services.AddScoped<IInjectedScopedService, InjectedScopedService>();
+
+                // explicitly register a grain class to assert that it will NOT use the registration, 
+                // as by design this is not supported.
+                services.AddTransient<ExplicitlyRegisteredSimpleDIGrain>(
+                    sp => new ExplicitlyRegisteredSimpleDIGrain(
+                        sp.GetRequiredService<IInjectedService>(),
+                        "some value",
+                        5));
             }
         }
 
@@ -55,8 +85,76 @@ namespace UnitTests.General
 
             // the injected service will return the same value only if it's the same instance
             Assert.Equal(
-                await grain1.GetStringValue(), 
-                await grain2.GetStringValue());
+                await grain1.GetInjectedSingletonServiceValue(), 
+                await grain2.GetInjectedSingletonServiceValue());
+
+            await grain1.DoDeactivate();
+            await grain2.DoDeactivate();
+        }
+
+        [Fact, TestCategory("BVT"), TestCategory("Functional")]
+        public async Task CanResolveScopedDependencies()
+        {
+            var grain1 = this.fixture.GrainFactory.GetGrain<IDIGrainWithInjectedServices>(GetRandomGrainId());
+            var grain2 = this.fixture.GrainFactory.GetGrain<IDIGrainWithInjectedServices>(GetRandomGrainId());
+
+            // the injected service will only return a different value if it's a different instance
+            Assert.NotEqual(
+                await grain1.GetInjectedScopedServiceValue(),
+                await grain2.GetInjectedScopedServiceValue());
+
+            await grain1.DoDeactivate();
+            await grain2.DoDeactivate();
+        }
+
+        [Fact, TestCategory("BVT"), TestCategory("Functional")]
+        public async Task CanResolveScopedGrainActivationContext()
+        {
+            long id1 = GetRandomGrainId();
+            long id2 = GetRandomGrainId();
+            var grain1 = this.fixture.GrainFactory.GetGrain<IDIGrainWithInjectedServices>(id1);
+            var grain2 = this.fixture.GrainFactory.GetGrain<IDIGrainWithInjectedServices>(id2);
+
+            // the injected service will only return a different value if it's a different instance
+            Assert.Contains(id1.ToString(), await grain1.GetStringValue());
+            Assert.Contains(id2.ToString(), await grain2.GetStringValue());
+
+            await grain1.DoDeactivate();
+            await grain2.DoDeactivate();
+        }
+
+        [Fact, TestCategory("BVT"), TestCategory("Functional")]
+        public async Task ScopedDependenciesAreThreadSafe()
+        {
+            const int parallelCalls = 10;
+            var grain1 = this.fixture.GrainFactory.GetGrain<IDIGrainWithInjectedServices>(GetRandomGrainId());
+
+            var calls =
+                Enumerable.Range(0, parallelCalls)
+                    .Select(i => grain1.GetInjectedScopedServiceValue())
+                    .ToList();
+
+            await Task.WhenAll(calls);
+            string expected = calls[0].Result;
+            foreach (var value in calls.Select(x => x.Result))
+            {
+                Assert.Equal(expected, value);
+            }
+
+            await grain1.DoDeactivate();
+        }
+
+        [Fact, TestCategory("BVT"), TestCategory("Functional")]
+        public async Task CanResolveSameDependenciesViaServiceProvider()
+        {
+            var grain1 = this.fixture.GrainFactory.GetGrain<IDIGrainWithInjectedServices>(GetRandomGrainId());
+            var grain2 = this.fixture.GrainFactory.GetGrain<IDIGrainWithInjectedServices>(GetRandomGrainId());
+
+            await grain1.AssertCanResolveSameServiceInstances();
+            await grain2.AssertCanResolveSameServiceInstances();
+
+            await grain1.DoDeactivate();
+            await grain2.DoDeactivate();
         }
 
         [Fact, TestCategory("BVT"), TestCategory("Functional")]
@@ -78,24 +176,6 @@ namespace UnitTests.General
             var exception = await Assert.ThrowsAsync<OrleansException>(() => grain.GetLongValue());
             Assert.Contains("Error creating activation for", exception.Message);
             Assert.Contains(nameof(ExplicitlyRegisteredSimpleDIGrain), exception.Message);
-        }
-
-        public class TestStartup
-        {
-            public IServiceProvider ConfigureServices(IServiceCollection services)
-            {
-                services.AddSingleton<IInjectedService, InjectedService>();
-
-                // explicitly register a grain class to assert that it will NOT use the registration, 
-                // as by design this is not supported.
-                services.AddTransient<ExplicitlyRegisteredSimpleDIGrain>(
-                    sp => new ExplicitlyRegisteredSimpleDIGrain(
-                        sp.GetRequiredService<IInjectedService>(),
-                        "some value",
-                        5));
-
-                return services.BuildServiceProvider();
-            }
         }
     }
 }
